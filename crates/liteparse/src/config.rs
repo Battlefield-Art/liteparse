@@ -45,6 +45,14 @@ pub struct LiteParseConfig {
     /// markdown output. Default on. Disable for benchmark parity with
     /// plain-text ground truth (the GT corpora never use link syntax).
     pub extract_links: bool,
+    /// Keep running header/footer chrome in markdown output instead of
+    /// stripping it. By default the markdown renderer removes lines that
+    /// repeat in the top/bottom page bands across pages (and single-page
+    /// chrome like `Page N of M`). Set `true` to retain everything —
+    /// useful for extraction pipelines that would rather deduplicate
+    /// downstream than risk losing content. Only affects Markdown output.
+    #[serde(default)]
+    pub keep_headers_footers: bool,
     /// Extract all PDF annotations into each parsed page. Default `false`.
     /// This is independent of `extract_links`, which only controls Markdown
     /// link reconstruction.
@@ -210,6 +218,7 @@ impl Default for LiteParseConfig {
             extract_images: false,
             image_output_dir: None,
             extract_links: true,
+            keep_headers_footers: false,
             extract_annotations: false,
             extract_form_fields: false,
             extract_structure_tree: false,

@@ -22,7 +22,7 @@ pub fn format_markdown(
     outline: &[OutlineTarget],
     image_mode: ImageMode,
 ) -> String {
-    format_markdown_pages(pages, outline, image_mode).join("\n\n-----\n\n")
+    format_markdown_pages(pages, outline, image_mode, false).join("\n\n-----\n\n")
 }
 
 /// Render each page to its own markdown string, returning one entry per input
@@ -32,10 +32,15 @@ pub fn format_markdown(
 /// (body size, heading map, header/footer set) is still computed across all
 /// pages so a single page renders identically whether requested alone or as
 /// part of the document.
+///
+/// `keep_headers_footers` disables running-chrome suppression entirely (both
+/// the cross-page repetition set and the single-page chrome detector), so
+/// repeated headers/footers and page markers stay in the output.
 pub fn format_markdown_pages(
     pages: &[ParsedPage],
     outline: &[OutlineTarget],
     image_mode: ImageMode,
+    keep_headers_footers: bool,
 ) -> Vec<String> {
     if pages.is_empty() {
         return Vec::new();
@@ -43,7 +48,11 @@ pub fn format_markdown_pages(
 
     let body_size = compute_body_size(pages);
     let heading_map = build_heading_map(pages, body_size);
-    let header_footer = compute_header_footer_set(pages);
+    let header_footer = if keep_headers_footers {
+        Default::default()
+    } else {
+        compute_header_footer_set(pages)
+    };
 
     pages
         .iter()
@@ -68,7 +77,11 @@ pub fn format_markdown_pages(
                 .filter(|e| e.page_index == target_index)
                 .cloned()
                 .collect();
-            let chrome_indices = detect_single_page_chrome(page, body_size);
+            let chrome_indices = if keep_headers_footers {
+                Default::default()
+            } else {
+                detect_single_page_chrome(page, body_size)
+            };
             let mut blocks = classify_page_with_filters(
                 page,
                 &heading_map,
@@ -268,7 +281,7 @@ mod tests {
         let a = page_with(1, vec![line("A page.", 50.0, 80.0, 10.0, 10.0)]);
         let b = page_with(2, vec![line("B page.", 50.0, 80.0, 10.0, 10.0)]);
         let pages = [a, b];
-        let per_page = format_markdown_pages(&pages, &[], ImageMode::Placeholder);
+        let per_page = format_markdown_pages(&pages, &[], ImageMode::Placeholder, false);
         assert_eq!(per_page.len(), 2);
         assert!(per_page[0].contains("A page."));
         assert!(per_page[1].contains("B page."));

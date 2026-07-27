@@ -76,6 +76,10 @@ struct ParseCommand {
     /// `[text](url)` in markdown output; pass this to emit plain anchor text.
     #[arg(long)]
     no_links: bool,
+    /// Keep running headers/footers in markdown output instead of stripping
+    /// repeated page-band lines and page chrome.
+    #[arg(long)]
+    keep_headers_footers: bool,
     /// Include all PDF annotations as page-scoped structured data.
     #[arg(long)]
     extract_annotations: bool,
@@ -276,6 +280,7 @@ pub fn run_cli(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
                 extract_images: cmd.extract_images,
                 image_output_dir: cmd.image_output_dir.clone(),
                 extract_links: !cmd.no_links,
+                keep_headers_footers: cmd.keep_headers_footers,
                 extract_annotations: cmd.extract_annotations,
                 extract_form_fields: cmd.extract_form_fields,
                 extract_structure_tree: cmd.extract_structure_tree,

@@ -56,6 +56,9 @@ pub struct LiteParseConfig {
     image_mode: Option<String>,
     extract_images: Option<bool>,
     extract_links: Option<bool>,
+    /// Keep running headers/footers in markdown output instead of stripping
+    /// repeated page-band lines and page chrome. Default false.
+    keep_headers_footers: Option<bool>,
     extract_annotations: Option<bool>,
     extract_form_fields: Option<bool>,
     extract_structure_tree: Option<bool>,
@@ -158,6 +161,9 @@ impl LiteParseConfig {
         if let Some(v) = self.extract_links {
             cfg.extract_links = v;
         }
+        if let Some(v) = self.keep_headers_footers {
+            cfg.keep_headers_footers = v;
+        }
         if let Some(v) = self.extract_annotations {
             cfg.extract_annotations = v;
         }
@@ -244,6 +250,7 @@ impl LiteParseConfig {
             }),
             extract_images: Some(cfg.extract_images),
             extract_links: Some(cfg.extract_links),
+            keep_headers_footers: Some(cfg.keep_headers_footers),
             extract_annotations: Some(cfg.extract_annotations),
             extract_form_fields: Some(cfg.extract_form_fields),
             extract_structure_tree: Some(cfg.extract_structure_tree),

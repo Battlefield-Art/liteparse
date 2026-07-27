@@ -123,6 +123,14 @@ struct ParseCommand {
     #[arg(long)]
     no_links: bool,
 
+    /// Keep running headers/footers in markdown output. By default, lines
+    /// that repeat in the top/bottom page bands across pages (and obvious
+    /// page chrome like `Page N of M`) are stripped from markdown. Pass this
+    /// to retain them all — e.g. for extraction pipelines that prefer to
+    /// deduplicate downstream rather than risk losing content.
+    #[arg(long)]
+    keep_headers_footers: bool,
+
     /// Include all PDF annotations as page-scoped structured JSON/API data.
     #[arg(long)]
     extract_annotations: bool,
@@ -391,6 +399,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 extract_images: cmd.extract_images,
                 image_output_dir: cmd.image_output_dir.clone(),
                 extract_links: !cmd.no_links,
+                keep_headers_footers: cmd.keep_headers_footers,
                 extract_annotations: cmd.extract_annotations,
                 extract_form_fields: cmd.extract_form_fields,
                 extract_structure_tree: cmd.extract_structure_tree,

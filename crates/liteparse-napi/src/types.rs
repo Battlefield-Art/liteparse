@@ -56,6 +56,9 @@ pub struct JsLiteParseConfig {
     /// Render hyperlink annotations as `[text](url)` in markdown output
     /// (default true). Set false for plain anchor text.
     pub extract_links: Option<bool>,
+    /// Keep running headers/footers in markdown output instead of stripping
+    /// repeated page-band lines and page chrome (default false).
+    pub keep_headers_footers: Option<bool>,
     /// Extract all PDF annotations as page-scoped structured data.
     pub extract_annotations: Option<bool>,
     /// Extract AcroForm widget fields and values.
@@ -176,6 +179,9 @@ impl JsLiteParseConfig {
         if let Some(v) = self.extract_links {
             cfg.extract_links = v;
         }
+        if let Some(v) = self.keep_headers_footers {
+            cfg.keep_headers_footers = v;
+        }
         if let Some(v) = self.extract_annotations {
             cfg.extract_annotations = v;
         }
@@ -260,6 +266,7 @@ impl JsLiteParseConfig {
             extract_images: Some(cfg.extract_images),
             image_output_dir: cfg.image_output_dir.clone(),
             extract_links: Some(cfg.extract_links),
+            keep_headers_footers: Some(cfg.keep_headers_footers),
             extract_annotations: Some(cfg.extract_annotations),
             extract_form_fields: Some(cfg.extract_form_fields),
             extract_structure_tree: Some(cfg.extract_structure_tree),

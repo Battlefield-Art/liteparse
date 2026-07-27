@@ -343,6 +343,7 @@ Options:
       --extract-text-metadata  Include rich PDF text metadata in text items
       --extract-vector-graphics Include page vector shapes and merged H/V lines
       --no-links               Emit link anchor text as plain text (no [text](url)) in markdown
+      --keep-headers-footers   Keep running headers/footers in markdown (skip repeated-line stripping)
       --extract-annotations    Include PDF annotations in page output
       --extract-form-fields    Include AcroForm widget fields and values
       --preserve-small-text    Keep very small text

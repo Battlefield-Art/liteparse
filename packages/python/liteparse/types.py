@@ -348,6 +348,9 @@ class LiteParseConfig:
     skip_diagonal_text: bool
     include_complexity: bool
     extract_text_metadata: bool = False
+    #: Keep running headers/footers in markdown output instead of stripping
+    #: repeated page-band lines and page chrome.
+    keep_headers_footers: bool = False
     extract_images: bool = False
     extract_vector_graphics: bool = False
     extract_xfa_packets: bool = False
