@@ -589,8 +589,12 @@ impl LiteParse {
         ));
 
         let mut full_text = if self.config.output_format == crate::config::OutputFormat::Markdown {
-            let page_md =
-                markdown::format_markdown_pages(&parsed_pages, &outline, self.config.image_mode);
+            let page_md = markdown::format_markdown_pages(
+                &parsed_pages,
+                &outline,
+                self.config.image_mode,
+                self.config.keep_headers_footers,
+            );
             let md = page_md.join("\n\n-----\n\n");
             for (page, md) in parsed_pages.iter_mut().zip(page_md) {
                 page.markdown = md;
@@ -647,8 +651,12 @@ impl LiteParse {
         let mut parsed_pages = projection::project_pages_to_grid(pages);
 
         let full_text = if self.config.output_format == crate::config::OutputFormat::Markdown {
-            let page_md =
-                markdown::format_markdown_pages(&parsed_pages, &outline, self.config.image_mode);
+            let page_md = markdown::format_markdown_pages(
+                &parsed_pages,
+                &outline,
+                self.config.image_mode,
+                self.config.keep_headers_footers,
+            );
             let md = page_md.join("\n\n-----\n\n");
             for (page, md) in parsed_pages.iter_mut().zip(page_md) {
                 page.markdown = md;

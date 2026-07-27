@@ -38,6 +38,8 @@ export interface LiteParseConfig {
   imageOutputDir?: string;
   /** Render hyperlink annotations as `[text](url)` in markdown output (default: true). */
   extractLinks: boolean;
+  /** Keep running headers/footers in markdown output instead of stripping repeated page-band lines and page chrome (default: false). */
+  keepHeadersFooters: boolean;
   /** Extract all PDF annotations into each parsed page (default: false). */
   extractAnnotations: boolean;
   /** Extract AcroForm widget fields and values (default: false). */
@@ -486,6 +488,7 @@ export class LiteParse {
       extractImages: userConfig.extractImages,
       imageOutputDir: userConfig.imageOutputDir,
       extractLinks: userConfig.extractLinks,
+      keepHeadersFooters: userConfig.keepHeadersFooters,
       extractAnnotations: userConfig.extractAnnotations,
       extractFormFields: userConfig.extractFormFields,
       extractStructureTree: userConfig.extractStructureTree,
@@ -525,6 +528,7 @@ export class LiteParse {
       extractImages: resolved.extractImages ?? false,
       imageOutputDir: resolved.imageOutputDir ?? undefined,
       extractLinks: resolved.extractLinks ?? true,
+      keepHeadersFooters: resolved.keepHeadersFooters ?? false,
       extractAnnotations: resolved.extractAnnotations ?? false,
       extractFormFields: resolved.extractFormFields ?? false,
       extractStructureTree: resolved.extractStructureTree ?? false,

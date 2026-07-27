@@ -990,6 +990,8 @@ struct PyLiteParseConfig {
     #[pyo3(get)]
     extract_links: bool,
     #[pyo3(get)]
+    keep_headers_footers: bool,
+    #[pyo3(get)]
     extract_annotations: bool,
     #[pyo3(get)]
     extract_form_fields: bool,
@@ -1065,6 +1067,7 @@ impl PyLiteParseConfig {
                 ImageMode::Embed => "embed".to_string(),
             },
             extract_links: cfg.extract_links,
+            keep_headers_footers: cfg.keep_headers_footers,
             extract_annotations: cfg.extract_annotations,
             extract_form_fields: cfg.extract_form_fields,
             extract_structure_tree: cfg.extract_structure_tree,
@@ -1122,6 +1125,7 @@ impl LiteParse {
         extract_images = None,
         image_output_dir = None,
         extract_links = None,
+        keep_headers_footers = None,
         extract_annotations = None,
         extract_form_fields = None,
         extract_structure_tree = None,
@@ -1156,6 +1160,7 @@ impl LiteParse {
         extract_images: Option<bool>,
         image_output_dir: Option<String>,
         extract_links: Option<bool>,
+        keep_headers_footers: Option<bool>,
         extract_annotations: Option<bool>,
         extract_form_fields: Option<bool>,
         extract_structure_tree: Option<bool>,
@@ -1231,6 +1236,9 @@ impl LiteParse {
         }
         if let Some(v) = extract_links {
             cfg.extract_links = v;
+        }
+        if let Some(v) = keep_headers_footers {
+            cfg.keep_headers_footers = v;
         }
         if let Some(v) = extract_annotations {
             cfg.extract_annotations = v;

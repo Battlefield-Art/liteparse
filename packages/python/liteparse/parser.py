@@ -365,6 +365,7 @@ class LiteParse:
         extract_images: Optional[bool] = None,
         image_output_dir: Optional[Union[str, Path]] = None,
         extract_links: Optional[bool] = None,
+        keep_headers_footers: Optional[bool] = None,
         extract_annotations: Optional[bool] = None,
         extract_form_fields: Optional[bool] = None,
         extract_structure_tree: Optional[bool] = None,
@@ -401,6 +402,9 @@ class LiteParse:
             num_workers: Number of concurrent OCR workers (default: CPU cores - 1)
             extract_links: Render hyperlink annotations as ``[text](url)`` in
                 markdown output (default: True). Set False for plain anchor text.
+            keep_headers_footers: Keep running headers/footers in markdown
+                output instead of stripping repeated page-band lines and page
+                chrome (default: False).
             image_output_dir: Directory where extracted embedded images are
                 written. Requires ``extract_images=True`` and returns file
                 names/paths in each ``ExtractedImage``.
@@ -483,6 +487,8 @@ class LiteParse:
             kwargs["image_output_dir"] = str(image_output_dir)
         if extract_links is not None:
             kwargs["extract_links"] = extract_links
+        if keep_headers_footers is not None:
+            kwargs["keep_headers_footers"] = keep_headers_footers
         if extract_annotations is not None:
             kwargs["extract_annotations"] = extract_annotations
         if extract_form_fields is not None:
@@ -660,6 +666,7 @@ class LiteParse:
             image_mode=cfg.image_mode,
             image_output_dir=cfg.image_output_dir,
             extract_links=cfg.extract_links,
+            keep_headers_footers=cfg.keep_headers_footers,
             extract_annotations=cfg.extract_annotations,
             extract_form_fields=cfg.extract_form_fields,
             extract_structure_tree=cfg.extract_structure_tree,

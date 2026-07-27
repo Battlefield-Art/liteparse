@@ -65,6 +65,10 @@ program
   )
   .option("--extract-images", "Extract embedded image bytes and metadata")
   .option("--no-links", "Disable hyperlink extraction (emit plain anchor text)")
+  .option(
+    "--keep-headers-footers",
+    "Keep running headers/footers in markdown output instead of stripping them",
+  )
   .option("--extract-annotations", "Include all PDF annotations in page output")
   .option("--extract-form-fields", "Include AcroForm widget fields and values")
   .option("--extract-structure-tree", "Include the tagged-PDF logical structure tree")
@@ -127,6 +131,7 @@ program
         config.imageOutputDir = opts.imageOutputDir as string;
       if (opts.extractImages) config.extractImages = true;
       if (opts.links === false) config.extractLinks = false;
+      if (opts.keepHeadersFooters) config.keepHeadersFooters = true;
       if (opts.extractAnnotations) config.extractAnnotations = true;
       if (opts.extractFormFields) config.extractFormFields = true;
       if (opts.extractStructureTree) config.extractStructureTree = true;
