@@ -151,28 +151,46 @@ async fn test_parse_office_doc_integration() {
 #[tokio::test]
 #[serial]
 async fn test_parse_pdf_integration() {
-    let lit = LiteParse::new(LiteParseConfig::default());
+    let lit = LiteParse::new(LiteParseConfig {
+        ocr_enabled: false,
+        ..LiteParseConfig::default()
+    });
     let parsed = lit
         .parse("../../integration_tests_data/sample.pdf")
         .await
         .expect("Should be able to parse");
     assert_eq!(parsed.pages.len(), 1);
+    assert!(parsed.doc_meta.file_version.is_some());
+    assert_eq!(parsed.doc_meta.is_encrypted, Some(false));
+    assert!(parsed.doc_meta.raw_file_size.is_some_and(|size| size > 0));
+    assert!(
+        parsed
+            .doc_meta
+            .eof_section_count
+            .is_some_and(|count| count > 0)
+    );
+    assert_eq!(parsed.doc_meta.signature_count, Some(0));
 }
 
 #[tokio::test]
 #[serial]
 async fn test_parse_bytes_pdf_integration() {
     let fixture_path = "../../integration_tests_data/sample.pdf";
-    let lit = LiteParse::new(LiteParseConfig::default());
+    let lit = LiteParse::new(LiteParseConfig {
+        ocr_enabled: false,
+        ..LiteParseConfig::default()
+    });
     let data = tokio::fs::read(fixture_path)
         .await
         .expect("Should be able to read file");
+    let expected_size = data.len() as u64;
     let input = PdfInput::Bytes(data);
     let parsed = lit
         .parse_input(input)
         .await
         .expect("Should be able to parse");
     assert_eq!(parsed.pages.len(), 1);
+    assert_eq!(parsed.doc_meta.raw_file_size, Some(expected_size));
 }
 
 /// Stress test: many concurrent `parse_input` calls on a multi-threaded

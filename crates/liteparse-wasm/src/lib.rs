@@ -612,9 +612,63 @@ pub struct ParseResult {
     /// The document's `/Info` `Producer` entry, when present.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub producer: Option<String>,
+    /// Document-level provenance metadata.
+    pub doc_meta: DocumentMetadata,
     /// Raw XFA packets; present only when `extractXfaPackets` is enabled.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub xfa_packets: Option<Vec<XfaPacket>>,
+}
+
+#[derive(Serialize, Tsify)]
+#[tsify(into_wasm_abi)]
+#[serde(rename_all = "camelCase")]
+pub struct DocumentMetadata {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub creation_date: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mod_date: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub file_version: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub is_encrypted: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub security_handler_revision: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub permissions: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub eof_section_count: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub startxref_count: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub trailer_id_pair_differs: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub raw_file_size: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub xmp: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub signature_count: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub signature_byte_range_reaches_eof: Option<bool>,
+}
+
+impl From<&liteparse::types::DocumentMetadata> for DocumentMetadata {
+    fn from(metadata: &liteparse::types::DocumentMetadata) -> Self {
+        Self {
+            creation_date: metadata.creation_date.clone(),
+            mod_date: metadata.mod_date.clone(),
+            file_version: metadata.file_version,
+            is_encrypted: metadata.is_encrypted,
+            security_handler_revision: metadata.security_handler_revision,
+            permissions: metadata.permissions.map(|value| value as f64),
+            eof_section_count: metadata.eof_section_count,
+            startxref_count: metadata.startxref_count,
+            trailer_id_pair_differs: metadata.trailer_id_pair_differs,
+            raw_file_size: metadata.raw_file_size.map(|value| value as f64),
+            xmp: metadata.xmp.clone(),
+            signature_count: metadata.signature_count,
+            signature_byte_range_reaches_eof: metadata.signature_byte_range_reaches_eof,
+        }
+    }
 }
 
 /// One raw packet from an XFA form document's `/XFA` array.
@@ -980,6 +1034,7 @@ impl LiteParse {
             form_type: result.form_type,
             creator: result.creator.clone(),
             producer: result.producer.clone(),
+            doc_meta: DocumentMetadata::from(&result.doc_meta),
             xfa_packets: result.xfa_packets.as_ref().map(|packets| {
                 packets
                     .iter()

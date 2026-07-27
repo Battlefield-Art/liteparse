@@ -239,7 +239,24 @@ export interface NativeParseResult {
   formType?: number;
   creator?: string;
   producer?: string;
+  docMeta: NativeDocumentMetadata;
   xfaPackets?: NativeXfaPacket[];
+}
+
+export interface NativeDocumentMetadata {
+  creationDate?: string;
+  modDate?: string;
+  fileVersion?: number;
+  isEncrypted?: boolean;
+  securityHandlerRevision?: number;
+  permissions?: number;
+  eofSectionCount?: number;
+  startxrefCount?: number;
+  trailerIdPairDiffers?: boolean;
+  rawFileSize?: number;
+  xmp?: string;
+  signatureCount?: number;
+  signatureByteRangeReachesEof?: boolean;
 }
 
 export interface NativeXfaPacket {

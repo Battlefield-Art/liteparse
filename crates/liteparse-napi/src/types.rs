@@ -874,8 +874,48 @@ pub struct JsParseResult {
     pub creator: Option<String>,
     /// The document's `/Info` `Producer` entry, when present.
     pub producer: Option<String>,
+    /// Document-level provenance metadata.
+    pub doc_meta: JsDocumentMetadata,
     /// Raw XFA packets; present only when `extractXfaPackets` is enabled.
     pub xfa_packets: Option<Vec<JsXfaPacket>>,
+}
+
+#[napi(object)]
+#[derive(Clone)]
+pub struct JsDocumentMetadata {
+    pub creation_date: Option<String>,
+    pub mod_date: Option<String>,
+    pub file_version: Option<i32>,
+    pub is_encrypted: Option<bool>,
+    pub security_handler_revision: Option<i32>,
+    pub permissions: Option<f64>,
+    pub eof_section_count: Option<u32>,
+    pub startxref_count: Option<u32>,
+    pub trailer_id_pair_differs: Option<bool>,
+    pub raw_file_size: Option<f64>,
+    pub xmp: Option<String>,
+    pub signature_count: Option<u32>,
+    pub signature_byte_range_reaches_eof: Option<bool>,
+}
+
+impl JsDocumentMetadata {
+    fn from_rust(metadata: &liteparse::types::DocumentMetadata) -> Self {
+        Self {
+            creation_date: metadata.creation_date.clone(),
+            mod_date: metadata.mod_date.clone(),
+            file_version: metadata.file_version,
+            is_encrypted: metadata.is_encrypted,
+            security_handler_revision: metadata.security_handler_revision,
+            permissions: metadata.permissions.map(|value| value as f64),
+            eof_section_count: metadata.eof_section_count,
+            startxref_count: metadata.startxref_count,
+            trailer_id_pair_differs: metadata.trailer_id_pair_differs,
+            raw_file_size: metadata.raw_file_size.map(|value| value as f64),
+            xmp: metadata.xmp.clone(),
+            signature_count: metadata.signature_count,
+            signature_byte_range_reaches_eof: metadata.signature_byte_range_reaches_eof,
+        }
+    }
 }
 
 /// One raw packet from an XFA form document's `/XFA` array.
@@ -1063,6 +1103,7 @@ impl JsParseResult {
             form_type: result.form_type,
             creator: result.creator.clone(),
             producer: result.producer.clone(),
+            doc_meta: JsDocumentMetadata::from_rust(&result.doc_meta),
             xfa_packets: result
                 .xfa_packets
                 .as_ref()

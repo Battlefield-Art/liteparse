@@ -50,6 +50,14 @@ pub struct XfaPacket {
     pub content: Option<Vec<u8>>,
 }
 
+/// Signature summary used for document provenance metadata.
+#[derive(Debug, Clone, Copy)]
+pub struct SignatureSummary {
+    pub count: u32,
+    /// `None` when signatures exist but PDFium did not expose any byte range.
+    pub byte_range_reaches_eof: Option<bool>,
+}
+
 impl<'lib> Document<'lib> {
     pub fn page_count(&self) -> i32 {
         unsafe { ffi!(FPDF_GetPageCount(self.handle)) }
@@ -131,6 +139,72 @@ impl<'lib> Document<'lib> {
             return None;
         }
         Some(String::from_utf16_lossy(&buf[..end]))
+    }
+
+    /// Encoded PDF version (`14` means PDF 1.4), when present.
+    pub fn file_version(&self) -> Option<i32> {
+        let mut version = 0;
+        let ok = unsafe { ffi!(FPDF_GetFileVersion(self.handle, &mut version)) };
+        (ok != 0).then_some(version)
+    }
+
+    /// PDF security-handler revision, or `-1` for an unencrypted document.
+    pub fn security_handler_revision(&self) -> i32 {
+        unsafe { ffi!(FPDF_GetSecurityHandlerRevision(self.handle)) }
+    }
+
+    /// Document permission flags reported by PDFium.
+    pub fn permissions(&self) -> u64 {
+        unsafe { ffi!(FPDF_GetDocPermissions(self.handle)) as u64 }
+    }
+
+    /// Count signatures and determine whether every readable final byte-range
+    /// segment reaches the current end of the file.
+    pub fn signature_summary(&self, file_size: Option<u64>) -> SignatureSummary {
+        const MAX_BYTE_RANGE_VALUES: usize = 8;
+        let count = unsafe { ffi!(FPDF_GetSignatureCount(self.handle)) }.max(0) as u32;
+        if count == 0 {
+            return SignatureSummary {
+                count,
+                byte_range_reaches_eof: None,
+            };
+        }
+
+        let mut known = false;
+        let mut reaches_eof = true;
+        for index in 0..count {
+            let signature = unsafe { ffi!(FPDF_GetSignatureObject(self.handle, index as i32)) };
+            if signature.is_null() {
+                continue;
+            }
+            let mut ranges = [0i32; MAX_BYTE_RANGE_VALUES];
+            let len = unsafe {
+                ffi!(FPDFSignatureObj_GetByteRange(
+                    signature,
+                    ranges.as_mut_ptr(),
+                    ranges.len() as std::os::raw::c_ulong,
+                ))
+            } as usize;
+            if !(2..=MAX_BYTE_RANGE_VALUES).contains(&len) {
+                continue;
+            }
+            known = true;
+            let start = i64::from(ranges[len - 2]);
+            let length = i64::from(ranges[len - 1]);
+            if let Some(file_size) = file_size
+                && (start < 0
+                    || length < 0
+                    || u64::try_from(start + length)
+                        .ok()
+                        .is_some_and(|range_end| range_end < file_size))
+            {
+                reaches_eof = false;
+            }
+        }
+        SignatureSummary {
+            count,
+            byte_range_reaches_eof: known.then_some(reaches_eof),
+        }
     }
 
     /// Number of packets in the document's `/XFA` array (0 for non-XFA docs).

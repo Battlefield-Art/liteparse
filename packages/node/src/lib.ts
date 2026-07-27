@@ -351,8 +351,30 @@ export interface ParseResult {
   creator?: string;
   /** The document's `/Info` `Producer` entry, when present. */
   producer?: string;
+  /** Document-level provenance metadata from PDFium and the source PDF. */
+  docMeta: DocumentMetadata;
   /** Raw XFA packets; present only when `extractXfaPackets` is enabled. */
   xfaPackets?: XfaPacket[];
+}
+
+/** Provenance and tamper-analysis facts extracted from the source PDF. */
+export interface DocumentMetadata {
+  creationDate?: string;
+  modDate?: string;
+  /** Encoded PDF version (`14` means PDF 1.4). */
+  fileVersion?: number;
+  isEncrypted?: boolean;
+  securityHandlerRevision?: number;
+  permissions?: number;
+  eofSectionCount?: number;
+  startxrefCount?: number;
+  trailerIdPairDiffers?: boolean;
+  rawFileSize?: number;
+  /** Raw XMP packet text, capped at 64 KiB. */
+  xmp?: string;
+  signatureCount?: number;
+  /** False when bytes were appended after a readable signature byte range. */
+  signatureByteRangeReachesEof?: boolean;
 }
 
 /** One raw packet from an XFA form document's `/XFA` array. */
@@ -560,6 +582,7 @@ export class LiteParse {
       formType: result.formType,
       creator: result.creator,
       producer: result.producer,
+      docMeta: result.docMeta,
       xfaPackets: result.xfaPackets,
     };
   }
@@ -584,6 +607,7 @@ export class LiteParse {
       text: result.text,
       images: (result.images ?? []).map(toImage),
       imageErrorCount: result.imageErrorCount ?? 0,
+      docMeta: result.docMeta,
     };
   }
 

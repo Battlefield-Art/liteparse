@@ -20,6 +20,7 @@ from .types import (
     ParsedPage,
     ParseError,
     ParseResult,
+    DocumentMetadata,
     ScreenshotRect,
     ScreenshotResult,
     TextItem,
@@ -308,6 +309,7 @@ def _convert_native_result(native_result: Any) -> ParseResult:
         for img in getattr(native_result, "images", [])
     ]
     native_xfa_packets = getattr(native_result, "xfa_packets", None)
+    native_doc_meta = getattr(native_result, "doc_meta", None)
     return ParseResult(
         pages=pages,
         text=native_result.text,
@@ -316,6 +318,27 @@ def _convert_native_result(native_result: Any) -> ParseResult:
         form_type=getattr(native_result, "form_type", None),
         creator=getattr(native_result, "creator", None),
         producer=getattr(native_result, "producer", None),
+        doc_meta=DocumentMetadata(
+            creation_date=getattr(native_doc_meta, "creation_date", None),
+            mod_date=getattr(native_doc_meta, "mod_date", None),
+            file_version=getattr(native_doc_meta, "file_version", None),
+            is_encrypted=getattr(native_doc_meta, "is_encrypted", None),
+            security_handler_revision=getattr(
+                native_doc_meta, "security_handler_revision", None
+            ),
+            permissions=getattr(native_doc_meta, "permissions", None),
+            eof_section_count=getattr(native_doc_meta, "eof_section_count", None),
+            startxref_count=getattr(native_doc_meta, "startxref_count", None),
+            trailer_id_pair_differs=getattr(
+                native_doc_meta, "trailer_id_pair_differs", None
+            ),
+            raw_file_size=getattr(native_doc_meta, "raw_file_size", None),
+            xmp=getattr(native_doc_meta, "xmp", None),
+            signature_count=getattr(native_doc_meta, "signature_count", None),
+            signature_byte_range_reaches_eof=getattr(
+                native_doc_meta, "signature_byte_range_reaches_eof", None
+            ),
+        ),
         xfa_packets=(
             [
                 XfaPacket(

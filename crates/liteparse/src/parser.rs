@@ -14,7 +14,8 @@ use crate::projection;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::render;
 use crate::types::{
-    ExtractedImage, OutlineTarget, Page, ParsedPage, PdfInput, ScreenshotRect, XfaPacket,
+    DocumentMetadata, ExtractedImage, OutlineTarget, Page, ParsedPage, PdfInput, ScreenshotRect,
+    XfaPacket,
 };
 use pdfium::Library;
 
@@ -42,6 +43,9 @@ pub struct ParseResult {
     pub creator: Option<String>,
     /// The document's `/Info` `Producer` entry, when present.
     pub producer: Option<String>,
+    /// Document provenance metadata (dates, version/security, signatures,
+    /// incremental-save markers, trailer IDs, raw XMP, and source size).
+    pub doc_meta: DocumentMetadata,
     /// Raw XFA packets, present only when `extract_xfa_packets` is enabled.
     /// `Some([])` means extraction ran on a non-XFA document.
     pub xfa_packets: Option<Vec<XfaPacket>>,
@@ -429,6 +433,7 @@ impl LiteParse {
             form_type,
             creator,
             producer,
+            doc_meta,
             xfa_packets,
         ) = {
             let lib = Library::init();
@@ -455,6 +460,16 @@ impl LiteParse {
                 .then(|| document.form_type());
             let creator = document.meta_text("Creator");
             let producer = document.meta_text("Producer");
+            #[cfg(not(target_arch = "wasm32"))]
+            let doc_meta = if repaired_input.is_some() {
+                let source_document =
+                    extract::load_document_from_input(&lib, &validated_input, password)?;
+                crate::document_metadata::extract(&validated_input, &source_document)
+            } else {
+                crate::document_metadata::extract(&validated_input, &document)
+            };
+            #[cfg(target_arch = "wasm32")]
+            let doc_meta = crate::document_metadata::extract(&validated_input, &document);
             let xfa_packets = self.config.extract_xfa_packets.then(|| {
                 document
                     .xfa_packets()
@@ -540,6 +555,7 @@ impl LiteParse {
                 form_type,
                 creator,
                 producer,
+                doc_meta,
                 xfa_packets,
             )
         };
@@ -631,6 +647,7 @@ impl LiteParse {
             form_type,
             creator,
             producer,
+            doc_meta,
             xfa_packets,
         })
     }
@@ -671,6 +688,7 @@ impl LiteParse {
             form_type: None,
             creator: None,
             producer: None,
+            doc_meta: DocumentMetadata::default(),
             xfa_packets: None,
         }
     }

@@ -256,8 +256,12 @@ link annotations. The field is absent by default; enabled untagged pages contain
 ### Document metadata, content bounds, and XFA packets
 
 Parse results (Rust/Node/Python APIs) carry the document's `/Info` `creator`
-and `producer` entries when present; these are API-only and never appear in
-CLI JSON output. Enable `--extract-content-bounds` (Rust/Python
+and `producer` entries when present, plus `doc_meta`
+(`docMeta` in JavaScript/WASM) with the `/Info` creation/modification
+dates, PDF version and encryption permissions, signature state, incremental-save
+markers, trailer ID comparison, raw XMP packet (capped at 64 KiB), and source
+file size. These document fields are API-only and never appear in CLI JSON
+output. Enable `--extract-content-bounds` (Rust/Python
 `extract_content_bounds`, JavaScript/WASM `extractContentBounds`) to add a
 per-page `content_bounds`: the union bbox of the page's top-level content
 objects in viewport coords (absent for empty pages). Enable

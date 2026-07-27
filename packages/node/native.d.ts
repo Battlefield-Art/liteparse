@@ -319,8 +319,25 @@ export interface JsParseResult {
   creator?: string
   /** The document's `/Info` `Producer` entry, when present. */
   producer?: string
+  /** Document-level provenance metadata. */
+  docMeta: JsDocumentMetadata
   /** Raw XFA packets; present only when `extractXfaPackets` is enabled. */
   xfaPackets?: Array<JsXfaPacket>
+}
+export interface JsDocumentMetadata {
+  creationDate?: string
+  modDate?: string
+  fileVersion?: number
+  isEncrypted?: boolean
+  securityHandlerRevision?: number
+  permissions?: number
+  eofSectionCount?: number
+  startxrefCount?: number
+  trailerIdPairDiffers?: boolean
+  rawFileSize?: number
+  xmp?: string
+  signatureCount?: number
+  signatureByteRangeReachesEof?: boolean
 }
 /** One raw packet from an XFA form document's `/XFA` array. */
 export interface JsXfaPacket {

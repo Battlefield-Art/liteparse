@@ -12,7 +12,7 @@ pub use font_db_resolver::FontDbResolver;
 pub use glyph_resolver::{GLYPH_RESOLVER_FONT_SIZE, GlyphResolver};
 pub use parser::{LiteParse, ParseResult, ScreenshotResult};
 pub use search::{SearchOptions, search_items};
-pub use types::{ParsedPage, TextItem, WordBox};
+pub use types::{DocumentMetadata, ParsedPage, TextItem, WordBox};
 
 // ── Modules with user-facing types (visible in docs) ───────────────────
 pub mod config;
@@ -28,6 +28,7 @@ mod acroform_repair;
 #[cfg(not(target_arch = "wasm32"))]
 #[doc(hidden)]
 pub mod conversion;
+mod document_metadata;
 #[doc(hidden)]
 pub mod extract;
 #[doc(hidden)]

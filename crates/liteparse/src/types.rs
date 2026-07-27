@@ -10,6 +10,40 @@ pub enum PdfInput {
     Bytes(Vec<u8>),
 }
 
+/// Document-level provenance metadata extracted from PDFium plus a bounded
+/// streaming scan of the source PDF. Fields stay optional so malformed
+/// metadata never prevents the document itself from being parsed.
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct DocumentMetadata {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub creation_date: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mod_date: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub file_version: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub is_encrypted: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub security_handler_revision: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub permissions: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub eof_section_count: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub startxref_count: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub trailer_id_pair_differs: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub raw_file_size: Option<u64>,
+    /// Raw XMP packet text, capped at 64 KiB.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub xmp: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub signature_count: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub signature_byte_range_reaches_eof: Option<bool>,
+}
+
 /// Represents a single text item extracted from a PDF page,
 /// including its content, position, size, rotation, and font metadata.
 #[derive(Debug, Clone, Default, Serialize)]

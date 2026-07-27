@@ -215,6 +215,26 @@ class XfaPacket:
 
 
 @dataclass
+class DocumentMetadata:
+    """Document-level provenance metadata from PDFium and the source PDF."""
+    creation_date: Optional[str] = None
+    mod_date: Optional[str] = None
+    #: Encoded PDF version (14 means PDF 1.4).
+    file_version: Optional[int] = None
+    is_encrypted: Optional[bool] = None
+    security_handler_revision: Optional[int] = None
+    permissions: Optional[int] = None
+    eof_section_count: Optional[int] = None
+    startxref_count: Optional[int] = None
+    trailer_id_pair_differs: Optional[bool] = None
+    raw_file_size: Optional[int] = None
+    #: Raw XMP packet text, capped at 64 KiB.
+    xmp: Optional[str] = None
+    signature_count: Optional[int] = None
+    signature_byte_range_reaches_eof: Optional[bool] = None
+
+
+@dataclass
 class ParseResult:
     """Result of parsing a document."""
     pages: List[ParsedPage]
@@ -227,6 +247,8 @@ class ParseResult:
     creator: Optional[str] = None
     #: The document's ``/Info`` ``Producer`` entry, when present.
     producer: Optional[str] = None
+    #: Document-level provenance metadata.
+    doc_meta: DocumentMetadata = field(default_factory=DocumentMetadata)
     #: Raw XFA packets; present only when ``extract_xfa_packets=True``.
     xfa_packets: Optional[List[XfaPacket]] = None
 

@@ -564,6 +564,22 @@ unsafe extern "C" {
     ) -> FPDF_BOOL;
 }
 unsafe extern "C" {
+    pub fn FPDF_GetSignatureCount(document: FPDF_DOCUMENT) -> ::std::os::raw::c_int;
+}
+unsafe extern "C" {
+    pub fn FPDF_GetSignatureObject(
+        document: FPDF_DOCUMENT,
+        index: ::std::os::raw::c_int,
+    ) -> FPDF_SIGNATURE;
+}
+unsafe extern "C" {
+    pub fn FPDFSignatureObj_GetByteRange(
+        signature: FPDF_SIGNATURE,
+        buffer: *mut ::std::os::raw::c_int,
+        length: ::std::os::raw::c_ulong,
+    ) -> ::std::os::raw::c_ulong;
+}
+unsafe extern "C" {
     pub fn FPDF_GetLastError() -> ::std::os::raw::c_ulong;
 }
 unsafe extern "C" {

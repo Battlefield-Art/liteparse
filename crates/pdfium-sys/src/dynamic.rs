@@ -67,6 +67,18 @@ pub struct PdfiumBindings {
         *mut std::os::raw::c_void,
         std::os::raw::c_ulong,
     ) -> std::os::raw::c_ulong,
+    pub FPDF_GetFileVersion:
+        unsafe extern "C" fn(FPDF_DOCUMENT, *mut std::os::raw::c_int) -> FPDF_BOOL,
+    pub FPDF_GetSecurityHandlerRevision: unsafe extern "C" fn(FPDF_DOCUMENT) -> std::os::raw::c_int,
+    pub FPDF_GetDocPermissions: unsafe extern "C" fn(FPDF_DOCUMENT) -> std::os::raw::c_ulong,
+    pub FPDF_GetSignatureCount: unsafe extern "C" fn(FPDF_DOCUMENT) -> std::os::raw::c_int,
+    pub FPDF_GetSignatureObject:
+        unsafe extern "C" fn(FPDF_DOCUMENT, std::os::raw::c_int) -> FPDF_SIGNATURE,
+    pub FPDFSignatureObj_GetByteRange: unsafe extern "C" fn(
+        FPDF_SIGNATURE,
+        *mut std::os::raw::c_int,
+        std::os::raw::c_ulong,
+    ) -> std::os::raw::c_ulong,
     pub FPDF_GetXFAPacketCount: unsafe extern "C" fn(FPDF_DOCUMENT) -> std::os::raw::c_int,
     pub FPDF_GetXFAPacketName: unsafe extern "C" fn(
         FPDF_DOCUMENT,
@@ -524,6 +536,12 @@ impl PdfiumBindings {
             FORM_DoPageAAction: load_fn!(lib, "FORM_DoPageAAction"),
             FPDF_FFLDraw: load_fn!(lib, "FPDF_FFLDraw"),
             FPDF_GetMetaText: load_fn!(lib, "FPDF_GetMetaText"),
+            FPDF_GetFileVersion: load_fn!(lib, "FPDF_GetFileVersion"),
+            FPDF_GetSecurityHandlerRevision: load_fn!(lib, "FPDF_GetSecurityHandlerRevision"),
+            FPDF_GetDocPermissions: load_fn!(lib, "FPDF_GetDocPermissions"),
+            FPDF_GetSignatureCount: load_fn!(lib, "FPDF_GetSignatureCount"),
+            FPDF_GetSignatureObject: load_fn!(lib, "FPDF_GetSignatureObject"),
+            FPDFSignatureObj_GetByteRange: load_fn!(lib, "FPDFSignatureObj_GetByteRange"),
             FPDF_GetXFAPacketCount: load_fn!(lib, "FPDF_GetXFAPacketCount"),
             FPDF_GetXFAPacketName: load_fn!(lib, "FPDF_GetXFAPacketName"),
             FPDF_GetXFAPacketContent: load_fn!(lib, "FPDF_GetXFAPacketContent"),
