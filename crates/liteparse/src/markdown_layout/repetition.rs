@@ -75,9 +75,6 @@ pub fn compute_header_footer_set(pages: &[ParsedPage]) -> std::collections::Hash
     }
     struct KeyStats {
         pages_seen: std::collections::HashSet<usize>,
-        /// Any occurrence's *original* text matched a chrome signature.
-        /// (Checked pre-normalization — `normalize_for_repetition` folds
-        /// digit runs to `#`, which would defeat the pattern checks.)
         is_chrome_pattern: bool,
     }
     // Two counters keyed by `(band, normalized_text)` — band is `'h'` or `'f'`.
