@@ -890,6 +890,51 @@ impl<'doc, 'lib: 'doc> Page<'doc, 'lib> {
         out
     }
 
+    /// Whether any visible annotation paints text through its `/AP /N`
+    /// appearance stream.
+    ///
+    /// PDFium's text API tokenizes the page content stream only — text drawn
+    /// by an annotation appearance is rendered but never extracted. Pages
+    /// authored that way (a common anti-copy / production-tool pattern) look
+    /// identical to a blank page through [`Page::text_items`], so callers need
+    /// this to tell "nothing here" from "content OCR can recover".
+    ///
+    /// Stops at the first text object found; hidden and popup annotations are
+    /// skipped because they are not painted in the render OCR would see.
+    pub fn has_annotation_text(&self) -> bool {
+        let count = unsafe { ffi!(FPDFPage_GetAnnotCount(self.handle)) };
+        for index in 0..count {
+            let annot = unsafe { ffi!(FPDFPage_GetAnnot(self.handle, index)) };
+            if annot.is_null() {
+                continue;
+            }
+            let subtype = unsafe { ffi!(FPDFAnnot_GetSubtype(annot)) };
+            let flags = unsafe { ffi!(FPDFAnnot_GetFlags(annot)) };
+            let hidden = flags & pdfium_sys::FPDF_ANNOT_FLAG_HIDDEN as i32 != 0;
+            let mut found = false;
+            if !hidden && subtype != pdfium_sys::FPDF_ANNOT_POPUP as i32 {
+                let object_count = unsafe { ffi!(FPDFAnnot_GetObjectCount(annot)) };
+                for object_index in 0..object_count {
+                    let object = unsafe { ffi!(FPDFAnnot_GetObject(annot, object_index)) };
+                    if object.is_null() {
+                        continue;
+                    }
+                    if unsafe { ffi!(FPDFPageObj_GetType(object)) }
+                        == pdfium_sys::FPDF_PAGEOBJ_TEXT as i32
+                    {
+                        found = true;
+                        break;
+                    }
+                }
+            }
+            unsafe { ffi!(FPDFPage_CloseAnnot(annot)) };
+            if found {
+                return true;
+            }
+        }
+        false
+    }
+
     /// Enumerate AcroForm widget annotations and resolve their field values
     /// through PDFium's form-fill environment.
     pub fn form_fields(

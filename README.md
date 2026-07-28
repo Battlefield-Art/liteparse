@@ -295,7 +295,7 @@ lit is-complex document.pdf --compact | jq '[.[] | select(.needs_ocr) | .page_nu
 It always prints per-page JSON to **stdout**, a human-readable verdict to **stderr**, and
 exits **non-zero when any page needs OCR**. Each page carries a `needs_ocr` verdict and a
 list of `reasons` (`scanned`, `no-text`, `sparse-text`, `embedded-images`, `garbled`,
-`vector-text`).
+`vector-text`, `annotation-text`).
 
 ### Batch Parsing
 

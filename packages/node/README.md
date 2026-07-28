@@ -159,7 +159,7 @@ for (const page of pages.filter((p) => p.needsOcr)) {
 ```
 
 `reasons` is one of `"scanned"`, `"no-text"`, `"sparse-text"`, `"embedded-images"`,
-`"garbled"`, or `"vector-text"`. Raw bytes work here too.
+`"garbled"`, `"vector-text"`, or `"annotation-text"`. Raw bytes work here too.
 
 ## Supported Formats
 
