@@ -892,12 +892,24 @@ struct PyPageComplexityStats {
     text_coverage: f32,
     #[pyo3(get)]
     has_substantial_images: bool,
+    /// Number of counted raster images — inline figures only; full-page
+    /// backgrounds are excluded (see `full_page_image`).
     #[pyo3(get)]
     image_block_count: usize,
+    /// Summed image-bbox area over page area, clamped to 1. Counts inline
+    /// figures only: a full-page scan raster contributes 0 here — check
+    /// `full_page_image` for that.
     #[pyo3(get)]
     image_coverage: f32,
+    /// Largest single counted image's area over page area, clamped to 1. Same
+    /// exclusion as `image_coverage`: a full-page raster contributes 0.
     #[pyo3(get)]
     largest_image_coverage: f32,
+    /// A single raster covering ≥90% of the page is present. Such full-page
+    /// backgrounds are excluded from `image_coverage`/`largest_image_coverage`
+    /// (they're not inline figures), so this flag is the only signal that
+    /// distinguishes a scan from a genuinely blank page — both otherwise
+    /// report no text and no counted images.
     #[pyo3(get)]
     full_page_image: bool,
     #[pyo3(get)]

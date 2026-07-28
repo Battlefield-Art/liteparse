@@ -1017,9 +1017,21 @@ pub struct JsPageComplexityStats {
     pub text_length: u32,
     pub text_coverage: f64,
     pub has_substantial_images: bool,
+    /// Number of counted raster images — inline figures only; full-page
+    /// backgrounds are excluded (see `fullPageImage`).
     pub image_block_count: u32,
+    /// Summed image-bbox area over page area, clamped to 1. Counts inline
+    /// figures only: a full-page scan raster contributes 0 here — check
+    /// `fullPageImage` for that.
     pub image_coverage: f64,
+    /// Largest single counted image's area over page area, clamped to 1. Same
+    /// exclusion as `imageCoverage`: a full-page raster contributes 0.
     pub largest_image_coverage: f64,
+    /// A single raster covering ≥90% of the page is present. Such full-page
+    /// backgrounds are excluded from `imageCoverage`/`largestImageCoverage`
+    /// (they're not inline figures), so this flag is the only signal that
+    /// distinguishes a scan from a genuinely blank page — both otherwise
+    /// report no text and no counted images.
     pub full_page_image: bool,
     pub uncovered_vector_area: Option<f64>,
     pub is_garbled: bool,

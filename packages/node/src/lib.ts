@@ -399,10 +399,21 @@ export interface PageComplexityStats {
   /** Fraction of the page area covered by native text (0–1). */
   textCoverage: number;
   hasSubstantialImages: boolean;
+  /**
+   * Number of counted raster images — inline figures only; full-page
+   * backgrounds are excluded (see {@link fullPageImage}).
+   */
   imageBlockCount: number;
-  /** Summed image-bbox area over page area, clamped to 1. */
+  /**
+   * Summed image-bbox area over page area, clamped to 1. Counts inline figures
+   * only: a full-page scan raster contributes 0 here — check
+   * {@link fullPageImage} for that.
+   */
   imageCoverage: number;
-  /** Largest single *counted* image's area over page area, clamped to 1. */
+  /**
+   * Largest single *counted* image's area over page area, clamped to 1. Same
+   * exclusion as {@link imageCoverage}: a full-page raster contributes 0.
+   */
   largestImageCoverage: number;
   /**
    * A single raster covers ≥90% of the page. Full-page backgrounds are excluded
