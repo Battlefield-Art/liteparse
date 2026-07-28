@@ -299,15 +299,7 @@ class LayoutComplexityStats:
 
 @dataclass
 class PageComplexityStats:
-    """Per-page complexity signals used to decide whether a document needs OCR.
-
-    The three image fields (``image_block_count``, ``image_coverage``,
-    ``largest_image_coverage``) describe *inline figures only*: a raster
-    covering ≥90% of the page in both dimensions is treated as a full-page
-    background and excluded from all three. A full-page scan therefore reports
-    ``full_page_image=True`` with ``image_coverage=0.0`` — trust
-    ``full_page_image`` (or ``"scanned"`` in ``reasons``), not the coverage
-    fractions, when deciding whether a page is a scan."""
+    """Per-page complexity signals used to decide whether a document needs OCR."""
     page_number: int
     #: Length of usable native text (garbled/unmappable items excluded).
     text_length: int
