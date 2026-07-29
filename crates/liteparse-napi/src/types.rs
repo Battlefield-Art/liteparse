@@ -348,6 +348,7 @@ pub struct JsTextItem {
     pub char_codes: Option<Vec<u32>>,
     /// True when the trailing source space was synthesized by PDFium.
     pub trailing_space_generated: Option<bool>,
+    /// OCR confidence score (0.0-1.0). Undefined for native PDF text.
     pub confidence: Option<f64>,
     /// Rotation in degrees (viewport space). Defaults to 0 when omitted.
     pub rotation: Option<f64>,
@@ -404,7 +405,7 @@ impl JsTextItem {
             stroke_color: item.stroke_color.clone(),
             char_codes: Some(item.char_codes.clone()),
             trailing_space_generated: Some(item.trailing_space_generated),
-            confidence: item.confidence.map(|v| v as f64).or(Some(1.0)),
+            confidence: item.confidence.map(|v| v as f64),
             words: item.words.iter().map(JsWordBox::from_rust).collect(),
         }
     }

@@ -35,7 +35,10 @@ function textItemToCliJson(item: TextItem, extractTextMetadata: boolean) {
     ...(item.trailingSpaceGenerated
       ? { trailing_space_generated: true }
       : {}),
-    ...(item.confidence !== undefined ? { confidence: item.confidence } : {}),
+    // The CLI JSON format reports native text as fully confident, matching the
+    // Rust CLI. The `confidence` field on TextItem itself stays undefined for
+    // native text so it can discriminate OCR-derived items.
+    confidence: item.confidence ?? 1.0,
   };
 }
 

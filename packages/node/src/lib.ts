@@ -154,6 +154,7 @@ export interface TextItem {
   charCodes?: number[];
   /** True when the trailing source space was synthesized by PDFium. */
   trailingSpaceGenerated?: boolean;
+  /** OCR confidence score (0.0-1.0). Undefined for native PDF text. */
   confidence?: number;
   /** Rotation in degrees (viewport space). Defaults to 0 when omitted. */
   rotation?: number;
