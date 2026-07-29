@@ -66,7 +66,7 @@ def _convert_structure_element(element: Any) -> StructureTreeElement:
         elif attribute.string_value is not None:
             attributes[attribute.name] = attribute.string_value
     return StructureTreeElement(
-        element_type=element.element_type,
+        type=element.element_type,
         id=element.id,
         actual_text=element.actual_text,
         alt_text=element.alt_text,
@@ -252,7 +252,7 @@ def _convert_native_result(native_result: Any) -> ParseResult:
                     [
                         FormField(
                             id=form.id,
-                            field_type=form.field_type,
+                            type=form.field_type,
                             page=form.page,
                             annotation_index=form.annotation_index,
                             widget_index=form.widget_index,

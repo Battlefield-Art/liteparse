@@ -2,7 +2,7 @@
 title: Multi-Format Support
 description: Parse Word documents, spreadsheets, presentations, and images with LiteParse.
 sidebar:
-  order: 4
+  order: 6
 ---
 
 LiteParse automatically converts non-PDF formats to PDF before parsing. This lets you use the same parsing pipeline for Office documents, images, and more.
@@ -67,8 +67,8 @@ lit batch-parse ./documents ./output --recursive
 ## How it works
 
 1. LiteParse detects the file extension
-2. If it's not a PDF, it converts to PDF using the appropriate tool (LibreOffice or ImageMagick)
+2. If it's not a PDF, it converts to PDF — office documents via LibreOffice, images and SVGs natively in Rust
 3. The resulting PDF is parsed normally
 4. Temporary conversion files are cleaned up automatically
 
-If the required conversion tool isn't installed, LiteParse will return an error explaining which dependency is needed.
+Only office formats need an external tool (LibreOffice). If it isn't installed, LiteParse returns an error explaining which dependency is needed.

@@ -76,7 +76,9 @@ class DocumentAnnotation:
 class FormField:
     """One AcroForm widget and its resolved field metadata."""
     id: str
-    field_type: str
+    #: Widget type, e.g. ``"text"``, ``"checkbox"``, ``"combobox"``. Named
+    #: ``type`` to match the ``type`` key in JSON output and the Node bindings.
+    type: str
     page: int
     annotation_index: int
     widget_index: int
@@ -93,6 +95,11 @@ class FormField:
     options: List[str] = field(default_factory=list)
     selected_options: List[str] = field(default_factory=list)
 
+    @property
+    def field_type(self) -> str:
+        """Deprecated alias for :attr:`type`."""
+        return self.type
+
 
 StructureAttributeValue = Union[bool, float, str]
 
@@ -100,7 +107,9 @@ StructureAttributeValue = Union[bool, float, str]
 @dataclass
 class StructureTreeElement:
     """One element in a tagged-PDF logical structure tree."""
-    element_type: str
+    #: Structure tag, e.g. ``"P"``, ``"Table"``, ``"H1"``. Named ``type`` to
+    #: match the ``type`` key in JSON output and the Node bindings.
+    type: str
     id: Optional[str] = None
     actual_text: Optional[str] = None
     alt_text: Optional[str] = None
@@ -109,6 +118,11 @@ class StructureTreeElement:
     marked_content_ids: List[int] = field(default_factory=list)
     children: List[StructureTreeElement] = field(default_factory=list)
     annotations: List[DocumentAnnotation] = field(default_factory=list)
+
+    @property
+    def element_type(self) -> str:
+        """Deprecated alias for :attr:`type`."""
+        return self.type
 
 
 @dataclass
