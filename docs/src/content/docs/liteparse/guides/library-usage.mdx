@@ -83,6 +83,8 @@ const parser = new LiteParse({
 });
 ```
 
+Images, vector graphics, annotations, form fields, structure trees, and per-item typography are all off by default and enabled with their own options. See [Extraction options](/liteparse/guides/extraction/).
+
 ### Buffer / Uint8Array input
 
 You can pass raw bytes directly instead of a file path:
@@ -108,7 +110,7 @@ Generate page images as buffers — useful for sending to LLMs or saving to disk
 
 ```typescript
 const parser = new LiteParse();
-const screenshots = parser.screenshot("document.pdf");
+const screenshots = await parser.screenshot("document.pdf");
 
 for (const shot of screenshots) {
   console.log(`Page ${shot.pageNum}: ${shot.width}x${shot.height}`);
@@ -116,7 +118,7 @@ for (const shot of screenshots) {
 }
 
 // Screenshot specific pages
-const shots = parser.screenshot("document.pdf", [1, 2, 3]);
+const shots = await parser.screenshot("document.pdf", [1, 2, 3]);
 ```
 
 ### Environment variables
@@ -167,6 +169,8 @@ parser = LiteParse(
 )
 result = parser.parse("document.pdf")
 ```
+
+All options are keyword-only. Images, vector graphics, annotations, form fields, structure trees, and per-item typography are off by default and enabled with their own options — see [Extraction options](/liteparse/guides/extraction/).
 
 ### Markdown output
 
@@ -273,6 +277,8 @@ let config = LiteParseConfig {
 };
 let parser = LiteParse::new(config);
 ```
+
+`LiteParseConfig` is a plain struct, so `..Default::default()` is the idiomatic way to set only what you need. Images, vector graphics, annotations, form fields, structure trees, and per-item typography are off by default — see [Extraction options](/liteparse/guides/extraction/).
 
 ### Markdown output
 
