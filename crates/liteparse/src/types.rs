@@ -27,17 +27,29 @@ pub struct DocumentMetadata {
     pub security_handler_revision: Option<i32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub permissions: Option<u64>,
+    /// Literal `%%EOF` markers in the file. A rough incremental-update signal:
+    /// embedded PDF attachments and content-stream text inflate it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub eof_section_count: Option<u32>,
+    /// Literal `startxref` markers in the file, with the same caveat.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub startxref_count: Option<u32>,
+    /// Whether the two halves of the last trailer `/ID` array differ, which
+    /// usually means the file was updated after creation. `None` when no
+    /// hex-string `/ID` pair was found in the last 1 MiB.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub trailer_id_pair_differs: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub raw_file_size: Option<u64>,
-    /// Raw XMP packet text, capped at 64 KiB.
+    /// The document catalog's `/Metadata` XMP packet, capped at 64 KiB.
+    /// `None` when the document has none, when it is too large to resolve
+    /// cheaply (see `extract_document_metadata`), or in WASM builds.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub xmp: Option<String>,
+    /// True when the catalog's XMP stream exceeded the 64 KiB cap and `xmp`
+    /// holds only its first 64 KiB.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub xmp_truncated: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub signature_count: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]

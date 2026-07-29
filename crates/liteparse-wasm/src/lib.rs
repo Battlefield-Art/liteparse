@@ -62,6 +62,9 @@ pub struct LiteParseConfig {
     /// Extract raw XFA packets (name + XML content) into
     /// `ParseResult.xfaPackets`. Default false.
     extract_xfa_packets: Option<bool>,
+    /// Collect document provenance metadata into `ParseResult.docMeta`.
+    /// Default false: it streams the whole source file once.
+    extract_document_metadata: Option<bool>,
     /// Emit each page's `contentBounds` (union bbox of top-level content
     /// objects, viewport coords). Default false.
     extract_content_bounds: Option<bool>,
@@ -170,6 +173,9 @@ impl LiteParseConfig {
         if let Some(v) = self.extract_xfa_packets {
             cfg.extract_xfa_packets = v;
         }
+        if let Some(v) = self.extract_document_metadata {
+            cfg.extract_document_metadata = v;
+        }
         if let Some(v) = self.extract_content_bounds {
             cfg.extract_content_bounds = v;
         }
@@ -248,6 +254,7 @@ impl LiteParseConfig {
             extract_form_fields: Some(cfg.extract_form_fields),
             extract_structure_tree: Some(cfg.extract_structure_tree),
             extract_xfa_packets: Some(cfg.extract_xfa_packets),
+            extract_document_metadata: Some(cfg.extract_document_metadata),
             extract_content_bounds: Some(cfg.extract_content_bounds),
             ocr_failure_fatal: Some(cfg.ocr_failure_fatal),
             ocr_hedge_delays_ms: Some(cfg.ocr_hedge_delays_ms.clone()),
@@ -612,8 +619,10 @@ pub struct ParseResult {
     /// The document's `/Info` `Producer` entry, when present.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub producer: Option<String>,
-    /// Document-level provenance metadata.
-    pub doc_meta: DocumentMetadata,
+    /// Document-level provenance metadata; present only when
+    /// `extractDocumentMetadata` is enabled and the input was a real PDF.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub doc_meta: Option<DocumentMetadata>,
     /// Raw XFA packets; present only when `extractXfaPackets` is enabled.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub xfa_packets: Option<Vec<XfaPacket>>,
@@ -645,6 +654,10 @@ pub struct DocumentMetadata {
     pub raw_file_size: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub xmp: Option<String>,
+    /// True when the catalog's XMP stream exceeded the 64 KiB cap. WASM
+    /// builds never populate `xmp`, so this is always absent there.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub xmp_truncated: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub signature_count: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -665,6 +678,7 @@ impl From<&liteparse::types::DocumentMetadata> for DocumentMetadata {
             trailer_id_pair_differs: metadata.trailer_id_pair_differs,
             raw_file_size: metadata.raw_file_size.map(|value| value as f64),
             xmp: metadata.xmp.clone(),
+            xmp_truncated: metadata.xmp_truncated,
             signature_count: metadata.signature_count,
             signature_byte_range_reaches_eof: metadata.signature_byte_range_reaches_eof,
         }
@@ -1034,7 +1048,7 @@ impl LiteParse {
             form_type: result.form_type,
             creator: result.creator.clone(),
             producer: result.producer.clone(),
-            doc_meta: DocumentMetadata::from(&result.doc_meta),
+            doc_meta: result.doc_meta.as_ref().map(DocumentMetadata::from),
             xfa_packets: result.xfa_packets.as_ref().map(|packets| {
                 packets
                     .iter()

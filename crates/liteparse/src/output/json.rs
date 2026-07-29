@@ -395,7 +395,7 @@ mod tests {
             form_type: None,
             creator: Some("LibreOffice".into()),
             producer: Some("LibreOffice 7.4".into()),
-            doc_meta: crate::types::DocumentMetadata::default(),
+            doc_meta: Some(crate::types::DocumentMetadata::default()),
             xfa_packets: Some(vec![crate::types::XfaPacket {
                 index: 0,
                 name: Some("datasets".into()),

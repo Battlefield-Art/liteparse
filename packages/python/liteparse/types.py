@@ -228,8 +228,12 @@ class DocumentMetadata:
     startxref_count: Optional[int] = None
     trailer_id_pair_differs: Optional[bool] = None
     raw_file_size: Optional[int] = None
-    #: Raw XMP packet text, capped at 64 KiB.
+    #: The document catalog's ``/Metadata`` XMP packet, capped at 64 KiB.
+    #: ``None`` when the document has none or it is too large to resolve
+    #: cheaply.
     xmp: Optional[str] = None
+    #: True when the catalog's XMP stream exceeded the 64 KiB cap.
+    xmp_truncated: Optional[bool] = None
     signature_count: Optional[int] = None
     signature_byte_range_reaches_eof: Optional[bool] = None
 
@@ -247,8 +251,10 @@ class ParseResult:
     creator: Optional[str] = None
     #: The document's ``/Info`` ``Producer`` entry, when present.
     producer: Optional[str] = None
-    #: Document-level provenance metadata.
-    doc_meta: DocumentMetadata = field(default_factory=DocumentMetadata)
+    #: Document-level provenance metadata. Present only when
+    #: ``extract_document_metadata=True`` and the input was a real PDF
+    #: (not converted from DOCX/XLSX/an image).
+    doc_meta: Optional[DocumentMetadata] = None
     #: Raw XFA packets; present only when ``extract_xfa_packets=True``.
     xfa_packets: Optional[List[XfaPacket]] = None
 
@@ -373,6 +379,7 @@ class LiteParseConfig:
     extract_images: bool = False
     extract_vector_graphics: bool = False
     extract_xfa_packets: bool = False
+    extract_document_metadata: bool = False
     detect_screenshot_rects: bool = False
     extract_content_bounds: bool = False
 

@@ -7,6 +7,13 @@ use std::io::{Read, Seek, SeekFrom};
 const SCAN_BUFFER_BYTES: usize = 1 << 20;
 const SCAN_OVERLAP: usize = 64;
 const XMP_MAX_BYTES: usize = 64 * 1024;
+/// Above this size, resolving the catalog's `/Metadata` object costs more than
+/// the whole parse: lopdf decodes every stream, so a 103 MB file takes ~7.8 s
+/// (worst case measured under the cap is ~0.5 s). Larger documents report no
+/// `xmp` at all rather than a cheaper guess — the first `<?xpacket` in the raw
+/// bytes is frequently an embedded image's packet, not the document's.
+#[cfg(not(target_arch = "wasm32"))]
+const XMP_CATALOG_MAX_FILE_BYTES: u64 = 16 * 1024 * 1024;
 
 pub(crate) fn extract(input: &PdfInput, document: &Document<'_>) -> DocumentMetadata {
     let mut metadata = match input {
@@ -30,9 +37,38 @@ pub(crate) fn extract(input: &PdfInput, document: &Document<'_>) -> DocumentMeta
         metadata.permissions = Some(document.permissions());
     }
     let signatures = document.signature_summary(metadata.raw_file_size);
-    metadata.signature_count = Some(signatures.count);
+    metadata.signature_count = signatures.count;
     metadata.signature_byte_range_reaches_eof = signatures.byte_range_reaches_eof;
+
+    #[cfg(not(target_arch = "wasm32"))]
+    if let Some((xmp, truncated)) = catalog_xmp(input, metadata.raw_file_size) {
+        metadata.xmp = Some(xmp);
+        metadata.xmp_truncated = Some(truncated);
+    }
     metadata
+}
+
+/// Read the document catalog's `/Metadata` XMP stream — the only XMP that is
+/// certainly the document's own. `None` when the file is too large to parse
+/// cheaply, has no catalog metadata, or cannot be decoded (encrypted or
+/// damaged); the caller then reports no XMP.
+#[cfg(not(target_arch = "wasm32"))]
+fn catalog_xmp(input: &PdfInput, file_size: Option<u64>) -> Option<(String, bool)> {
+    if file_size? > XMP_CATALOG_MAX_FILE_BYTES {
+        return None;
+    }
+    let document = match input {
+        PdfInput::Path(path) => lopdf::Document::load(path).ok()?,
+        PdfInput::Bytes(bytes) => lopdf::Document::load_mem(bytes).ok()?,
+    };
+    let object = document.catalog().ok()?.get(b"Metadata").ok()?;
+    let stream = document.dereference(object).ok()?.1.as_stream().ok()?;
+    let bytes = stream
+        .decompressed_content()
+        .unwrap_or_else(|_| stream.content.clone());
+    let truncated = bytes.len() > XMP_MAX_BYTES;
+    let text = String::from_utf8_lossy(&bytes[..bytes.len().min(XMP_MAX_BYTES)]).into_owned();
+    (!text.trim().is_empty()).then_some((text, truncated))
 }
 
 fn extract_raw_facts<R: Read + Seek>(reader: &mut R) -> DocumentMetadata {
@@ -45,16 +81,13 @@ fn extract_raw_facts<R: Read + Seek>(reader: &mut R) -> DocumentMetadata {
 
     let mut buffer = vec![0u8; SCAN_BUFFER_BYTES];
     let mut carry = 0usize;
-    let mut file_offset = 0u64;
     let mut eof_count = 0u32;
     let mut startxref_count = 0u32;
-    let mut xmp_start = None;
 
     loop {
-        let got = match reader.read(&mut buffer[carry..]) {
-            Ok(got) => got,
-            Err(_) => break,
-        };
+        // Must be a full fill, not a single `read`: a short read would shrink
+        // the window below a marker's length and lose it entirely.
+        let got = fill_buffer(reader, &mut buffer[carry..]);
         let window_len = carry + got;
         if window_len == 0 {
             break;
@@ -71,15 +104,9 @@ fn extract_raw_facts<R: Read + Seek>(reader: &mut R) -> DocumentMetadata {
             b"startxref",
             countable,
         ));
-        if xmp_start.is_none()
-            && let Some(offset) = find_bytes(window, b"<?xpacket begin")
-        {
-            xmp_start = Some(file_offset + offset as u64);
-        }
         if got == 0 {
             break;
         }
-        file_offset += countable as u64;
         carry = window_len - countable;
         buffer.copy_within(countable..window_len, 0);
     }
@@ -89,56 +116,49 @@ fn extract_raw_facts<R: Read + Seek>(reader: &mut R) -> DocumentMetadata {
 
     if let Some(file_size) = file_size {
         let tail_start = file_size.saturating_sub(SCAN_BUFFER_BYTES as u64);
-        if reader.seek(SeekFrom::Start(tail_start)).is_ok() {
-            let mut tail = vec![0u8; (file_size - tail_start) as usize];
-            if let Ok(got) = reader.read(&mut tail) {
-                tail.truncate(got);
-                metadata.trailer_id_pair_differs = trailer_id_pair_differs(&tail);
-            }
-        }
-    }
-
-    if let Some(xmp_start) = xmp_start
-        && reader.seek(SeekFrom::Start(xmp_start)).is_ok()
-    {
-        let mut xmp = vec![0u8; XMP_MAX_BYTES];
-        if let Ok(got) = reader.read(&mut xmp) {
-            xmp.truncate(got);
-            if let Some(packet_end) = find_bytes(&xmp, b"<?xpacket end") {
-                let suffix = &xmp[packet_end..];
-                let end = find_bytes(suffix, b"?>")
-                    .map(|offset| packet_end + offset + 2)
-                    .unwrap_or(packet_end + b"<?xpacket end".len());
-                xmp.truncate(end.min(xmp.len()));
-            }
-            metadata.xmp = Some(String::from_utf8_lossy(&xmp).into_owned());
+        if reader.seek(SeekFrom::Start(tail_start)).is_ok()
+            && let Some(tail) = read_up_to(reader, (file_size - tail_start) as usize)
+        {
+            metadata.trailer_id_pair_differs = trailer_id_pair_differs(&tail);
         }
     }
 
     metadata
 }
 
+/// Read up to `max` bytes, retrying short reads. `None` when the reader
+/// yielded nothing at all.
+fn read_up_to<R: Read>(reader: &mut R, max: usize) -> Option<Vec<u8>> {
+    let mut buffer = vec![0u8; max];
+    let got = fill_buffer(reader, &mut buffer);
+    buffer.truncate(got);
+    (got > 0).then_some(buffer)
+}
+
+/// Fill `buf` completely, looping over short reads. Returns the byte count,
+/// short only at EOF or on a read error.
+fn fill_buffer<R: Read>(reader: &mut R, buf: &mut [u8]) -> usize {
+    let mut filled = 0;
+    while filled < buf.len() {
+        match reader.read(&mut buf[filled..]) {
+            Ok(0) => break,
+            Ok(got) => filled += got,
+            Err(ref e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(_) => break,
+        }
+    }
+    filled
+}
+
 fn find_bytes(haystack: &[u8], needle: &[u8]) -> Option<usize> {
-    (!needle.is_empty() && haystack.len() >= needle.len())
-        .then(|| {
-            haystack
-                .windows(needle.len())
-                .position(|part| part == needle)
-        })
-        .flatten()
+    memchr::memmem::find(haystack, needle)
 }
 
 fn count_occurrences_before(haystack: &[u8], needle: &[u8], start_limit: usize) -> u32 {
-    let mut count = 0u32;
-    let mut cursor = 0usize;
-    while let Some(offset) = find_bytes(&haystack[cursor..], needle) {
-        if cursor + offset >= start_limit {
-            break;
-        }
-        count = count.saturating_add(1);
-        cursor += offset + needle.len();
-    }
-    count
+    memchr::memmem::find_iter(haystack, needle)
+        .take_while(|offset| *offset < start_limit)
+        .count()
+        .min(u32::MAX as usize) as u32
 }
 
 fn trailer_id_pair_differs(bytes: &[u8]) -> Option<bool> {
@@ -182,17 +202,39 @@ mod tests {
     #[test]
     fn extracts_raw_provenance_facts() {
         let pdf = b"%PDF-1.4\n/ID [<aaaa><bbbb>]\nstartxref\n1\n%%EOF\n\
-                    update\n/ID [ <cccc> <dddd> ]\nstartxref\n2\n%%EOF\n\
-                    <?xpacket begin='x'?><x:xmpmeta>ok</x:xmpmeta><?xpacket end='w'?>tail";
+                    update\n/ID [ <cccc> <dddd> ]\nstartxref\n2\n%%EOF\ntail";
         let metadata = extract_raw_facts(&mut std::io::Cursor::new(pdf));
         assert_eq!(metadata.raw_file_size, Some(pdf.len() as u64));
         assert_eq!(metadata.eof_section_count, Some(2));
         assert_eq!(metadata.startxref_count, Some(2));
         assert_eq!(metadata.trailer_id_pair_differs, Some(true));
-        assert_eq!(
-            metadata.xmp.as_deref(),
-            Some("<?xpacket begin='x'?><x:xmpmeta>ok</x:xmpmeta><?xpacket end='w'?>")
-        );
+        // XMP comes from the catalog only; the raw scan never guesses at it.
+        assert_eq!(metadata.xmp, None);
+    }
+
+    /// A reader that hands back one byte at a time, like a slow pipe.
+    struct DripReader(std::io::Cursor<Vec<u8>>);
+
+    impl Read for DripReader {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            let take = buf.len().min(1);
+            self.0.read(&mut buf[..take])
+        }
+    }
+
+    impl Seek for DripReader {
+        fn seek(&mut self, pos: SeekFrom) -> std::io::Result<u64> {
+            self.0.seek(pos)
+        }
+    }
+
+    #[test]
+    fn short_reads_do_not_lose_markers_or_the_trailer() {
+        let pdf = b"%PDF-1.4\nbody\n/ID [<aaaa><bbbb>]\nstartxref\n1\n%%EOF\n";
+        let metadata = extract_raw_facts(&mut DripReader(std::io::Cursor::new(pdf.to_vec())));
+        assert_eq!(metadata.trailer_id_pair_differs, Some(true));
+        assert_eq!(metadata.startxref_count, Some(1));
+        assert_eq!(metadata.eof_section_count, Some(1));
     }
 
     #[test]
@@ -207,13 +249,9 @@ mod tests {
     #[test]
     fn finds_markers_that_cross_scan_chunks_without_double_counting() {
         let mut pdf = vec![b'x'; SCAN_BUFFER_BYTES - 7];
-        pdf.extend_from_slice(b"startxref\n%%EOF\n<?xpacket begin='x'?>payload");
+        pdf.extend_from_slice(b"startxref\n%%EOF\npayload");
         let metadata = extract_raw_facts(&mut std::io::Cursor::new(pdf));
         assert_eq!(metadata.startxref_count, Some(1));
         assert_eq!(metadata.eof_section_count, Some(1));
-        assert_eq!(
-            metadata.xmp.as_deref(),
-            Some("<?xpacket begin='x'?>payload")
-        );
     }
 }

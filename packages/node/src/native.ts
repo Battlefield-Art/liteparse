@@ -37,6 +37,7 @@ export interface LiteParseNativeConfig {
   extractFormFields?: boolean;
   extractStructureTree?: boolean;
   extractXfaPackets?: boolean;
+  extractDocumentMetadata?: boolean;
   extractContentBounds?: boolean;
   detectScreenshotRects?: boolean;
   renderFormFields?: boolean;
@@ -239,7 +240,7 @@ export interface NativeParseResult {
   formType?: number;
   creator?: string;
   producer?: string;
-  docMeta: NativeDocumentMetadata;
+  docMeta?: NativeDocumentMetadata;
   xfaPackets?: NativeXfaPacket[];
 }
 
@@ -255,6 +256,7 @@ export interface NativeDocumentMetadata {
   trailerIdPairDiffers?: boolean;
   rawFileSize?: number;
   xmp?: string;
+  xmpTruncated?: boolean;
   signatureCount?: number;
   signatureByteRangeReachesEof?: boolean;
 }

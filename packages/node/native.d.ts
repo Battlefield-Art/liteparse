@@ -62,6 +62,7 @@ export interface JsLiteParseConfig {
    * `ParseResult.xfaPackets`. Default false.
    */
   extractXfaPackets?: boolean
+  extractDocumentMetadata?: boolean
   /**
    * Emit each page's `contentBounds` (union bbox of top-level content
    * objects, viewport coords). Default false.
@@ -319,8 +320,11 @@ export interface JsParseResult {
   creator?: string
   /** The document's `/Info` `Producer` entry, when present. */
   producer?: string
-  /** Document-level provenance metadata. */
-  docMeta: JsDocumentMetadata
+  /**
+   * Document-level provenance metadata; present only when
+   * `extractDocumentMetadata` is enabled and the input was a real PDF.
+   */
+  docMeta?: JsDocumentMetadata
   /** Raw XFA packets; present only when `extractXfaPackets` is enabled. */
   xfaPackets?: Array<JsXfaPacket>
 }
@@ -336,6 +340,7 @@ export interface JsDocumentMetadata {
   trailerIdPairDiffers?: boolean
   rawFileSize?: number
   xmp?: string
+  xmpTruncated?: boolean
   signatureCount?: number
   signatureByteRangeReachesEof?: boolean
 }

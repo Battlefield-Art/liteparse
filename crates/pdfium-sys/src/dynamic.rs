@@ -23,6 +23,17 @@ macro_rules! load_fn {
     }};
 }
 
+/// Like `load_fn!`, but yields `None` instead of failing the whole load when
+/// the symbol is missing. For APIs a trimmed pdfium build may omit — callers
+/// must degrade gracefully rather than assume the function exists.
+macro_rules! load_fn_opt {
+    ($lib:expr, $name:literal) => {{
+        unsafe { $lib.get::<*const ()>($name.as_bytes()) }
+            .ok()
+            .map(|sym| unsafe { std::mem::transmute(*sym) })
+    }};
+}
+
 /// Holds all pdfium function pointers loaded at runtime.
 pub struct PdfiumBindings {
     // Keep the library handle alive — dropping it would unload the symbols.
@@ -71,14 +82,18 @@ pub struct PdfiumBindings {
         unsafe extern "C" fn(FPDF_DOCUMENT, *mut std::os::raw::c_int) -> FPDF_BOOL,
     pub FPDF_GetSecurityHandlerRevision: unsafe extern "C" fn(FPDF_DOCUMENT) -> std::os::raw::c_int,
     pub FPDF_GetDocPermissions: unsafe extern "C" fn(FPDF_DOCUMENT) -> std::os::raw::c_ulong,
-    pub FPDF_GetSignatureCount: unsafe extern "C" fn(FPDF_DOCUMENT) -> std::os::raw::c_int,
+    // `fpdf_signature` is absent from some trimmed pdfium builds, so these
+    // three load optionally and callers fall back to "no signature info".
+    pub FPDF_GetSignatureCount: Option<unsafe extern "C" fn(FPDF_DOCUMENT) -> std::os::raw::c_int>,
     pub FPDF_GetSignatureObject:
-        unsafe extern "C" fn(FPDF_DOCUMENT, std::os::raw::c_int) -> FPDF_SIGNATURE,
-    pub FPDFSignatureObj_GetByteRange: unsafe extern "C" fn(
-        FPDF_SIGNATURE,
-        *mut std::os::raw::c_int,
-        std::os::raw::c_ulong,
-    ) -> std::os::raw::c_ulong,
+        Option<unsafe extern "C" fn(FPDF_DOCUMENT, std::os::raw::c_int) -> FPDF_SIGNATURE>,
+    pub FPDFSignatureObj_GetByteRange: Option<
+        unsafe extern "C" fn(
+            FPDF_SIGNATURE,
+            *mut std::os::raw::c_int,
+            std::os::raw::c_ulong,
+        ) -> std::os::raw::c_ulong,
+    >,
     pub FPDF_GetXFAPacketCount: unsafe extern "C" fn(FPDF_DOCUMENT) -> std::os::raw::c_int,
     pub FPDF_GetXFAPacketName: unsafe extern "C" fn(
         FPDF_DOCUMENT,
@@ -539,9 +554,9 @@ impl PdfiumBindings {
             FPDF_GetFileVersion: load_fn!(lib, "FPDF_GetFileVersion"),
             FPDF_GetSecurityHandlerRevision: load_fn!(lib, "FPDF_GetSecurityHandlerRevision"),
             FPDF_GetDocPermissions: load_fn!(lib, "FPDF_GetDocPermissions"),
-            FPDF_GetSignatureCount: load_fn!(lib, "FPDF_GetSignatureCount"),
-            FPDF_GetSignatureObject: load_fn!(lib, "FPDF_GetSignatureObject"),
-            FPDFSignatureObj_GetByteRange: load_fn!(lib, "FPDFSignatureObj_GetByteRange"),
+            FPDF_GetSignatureCount: load_fn_opt!(lib, "FPDF_GetSignatureCount"),
+            FPDF_GetSignatureObject: load_fn_opt!(lib, "FPDF_GetSignatureObject"),
+            FPDFSignatureObj_GetByteRange: load_fn_opt!(lib, "FPDFSignatureObj_GetByteRange"),
             FPDF_GetXFAPacketCount: load_fn!(lib, "FPDF_GetXFAPacketCount"),
             FPDF_GetXFAPacketName: load_fn!(lib, "FPDF_GetXFAPacketName"),
             FPDF_GetXFAPacketContent: load_fn!(lib, "FPDF_GetXFAPacketContent"),
