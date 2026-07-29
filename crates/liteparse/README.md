@@ -146,7 +146,7 @@ if pages.iter().any(|p| p.needs_ocr) {
 ```
 
 `reasons` is a `Vec<ComplexityReason>` (`Scanned`, `NoText`, `SparseText`,
-`EmbeddedImages`, `Garbled`, `VectorText`); new variants may be added over time, so match
+`EmbeddedImages`, `Garbled`, `VectorText`, `AnnotationText`); new variants may be added over time, so match
 leniently.
 
 ## Custom OCR Engine

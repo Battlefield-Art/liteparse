@@ -57,7 +57,9 @@ pub enum ComplexityReason {
     /// no extractable text behind it — a scanned/photographed page.
     Scanned,
     /// Almost no extractable native text, and no full-page raster behind it
-    /// (a blank page, or a near-empty cover/divider).
+    /// (a blank page, or a near-empty cover/divider). Check for a companion
+    /// `AnnotationText` before treating the page as blank — it means the text
+    /// is there, just outside the extractable surface.
     NoText,
     /// Some real text, but it covers very little of the page — typically a
     /// figure-heavy page with only thin captions.
@@ -70,6 +72,13 @@ pub enum ComplexityReason {
     /// Text is painted as filled vector outlines, outside the text layer, so
     /// no native text items represent it.
     VectorText,
+    /// The page's own content stream has (almost) no text, but an annotation
+    /// paints text through its appearance stream. PDFium extracts the content
+    /// stream only, so this text is invisible to the text-only path even
+    /// though the page renders — and OCR does recover it. Always accompanied
+    /// by `NoText` or `Scanned`; it tells a genuinely blank page apart from
+    /// one whose body text simply lives out of reach.
+    AnnotationText,
 }
 
 impl ComplexityReason {
@@ -81,6 +90,7 @@ impl ComplexityReason {
             ComplexityReason::EmbeddedImages => "embedded-images",
             ComplexityReason::Garbled => "garbled",
             ComplexityReason::VectorText => "vector-text",
+            ComplexityReason::AnnotationText => "annotation-text",
         }
     }
 }
@@ -205,6 +215,13 @@ pub(crate) fn calculate_page_complexity(
         } else {
             ComplexityReason::NoText
         });
+        // ...unless the text is there and simply out of PDFium's reach: text
+        // painted by an annotation appearance stream renders (so OCR gets it)
+        // but is never tokenized by the text API. Only checked on pages that
+        // already look empty, so the annotation walk stays off the hot path.
+        if page_obj.has_annotation_text() {
+            reasons.push(ComplexityReason::AnnotationText);
+        }
     } else if sparse_text {
         // There is real text, but it's too thin to be the whole page.
         reasons.push(ComplexityReason::SparseText);

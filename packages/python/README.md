@@ -140,7 +140,7 @@ for page in pages:
 ```
 
 `reasons` is one of `"scanned"`, `"no-text"`, `"sparse-text"`, `"embedded-images"`,
-`"garbled"`, or `"vector-text"`. Raw bytes work here too.
+`"garbled"`, `"vector-text"`, or `"annotation-text"`. Raw bytes work here too.
 
 ## Supported Formats
 

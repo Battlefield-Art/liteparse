@@ -1,6 +1,7 @@
 use std::path::Path;
 
 use liteparse::conversion::convert_data_to_pdf;
+use liteparse::ocr_merge::ComplexityReason;
 use liteparse::types::PdfInput;
 use liteparse::{LiteParse, LiteParseConfig};
 use serial_test::serial;
@@ -224,4 +225,30 @@ async fn test_concurrent_parse_does_not_crash() {
     }
     // 16 tasks × 1 page each
     assert_eq!(total, 16);
+}
+
+/// A page whose only text is painted by an annotation's `/AP /N` appearance
+/// stream extracts as empty (PDFium tokenizes the page content stream only),
+/// so it must be distinguishable from a genuinely blank page. See issue #378.
+#[tokio::test]
+#[serial]
+async fn test_annotation_text_complexity_reason() {
+    let lit = LiteParse::new(LiteParseConfig::default());
+    let stats = lit
+        .is_complex(PdfInput::Path(
+            "../../integration_tests_data/annotation_text.pdf".into(),
+        ))
+        .await
+        .expect("is_complex should succeed");
+
+    assert_eq!(stats.len(), 1);
+    let page = &stats[0];
+    assert_eq!(page.text_length, 0, "annotation text is not extractable");
+    assert!(page.needs_ocr);
+    assert!(page.reasons.contains(&ComplexityReason::NoText));
+    assert!(
+        page.reasons.contains(&ComplexityReason::AnnotationText),
+        "expected annotation-text, got {:?}",
+        page.reasons
+    );
 }

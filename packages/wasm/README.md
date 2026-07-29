@@ -52,7 +52,7 @@ if (pages.some((p) => p.needsOcr)) {
 ```
 
 `reasons` is one of `"scanned"`, `"no-text"`, `"sparse-text"`, `"embedded-images"`,
-`"garbled"`, or `"vector-text"`.
+`"garbled"`, `"vector-text"`, or `"annotation-text"`.
 
 ## Config options
 

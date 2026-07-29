@@ -366,6 +366,10 @@ pub struct PdfiumBindings {
     pub FPDFAnnot_GetLinkedAnnot:
         unsafe extern "C" fn(FPDF_ANNOTATION, FPDF_BYTESTRING) -> FPDF_ANNOTATION,
     pub FPDFAnnot_GetObjNum: unsafe extern "C" fn(FPDF_ANNOTATION) -> std::os::raw::c_int,
+    pub FPDFAnnot_GetFlags: unsafe extern "C" fn(FPDF_ANNOTATION) -> std::os::raw::c_int,
+    pub FPDFAnnot_GetObjectCount: unsafe extern "C" fn(FPDF_ANNOTATION) -> std::os::raw::c_int,
+    pub FPDFAnnot_GetObject:
+        unsafe extern "C" fn(FPDF_ANNOTATION, std::os::raw::c_int) -> FPDF_PAGEOBJECT,
     pub FPDFAnnot_GetFormFieldFlags:
         unsafe extern "C" fn(FPDF_FORMHANDLE, FPDF_ANNOTATION) -> std::os::raw::c_int,
     pub FPDFAnnot_GetFormFieldName: unsafe extern "C" fn(
@@ -629,6 +633,9 @@ impl PdfiumBindings {
             FPDFAnnot_GetLink: load_fn!(lib, "FPDFAnnot_GetLink"),
             FPDFAnnot_GetLinkedAnnot: load_fn!(lib, "FPDFAnnot_GetLinkedAnnot"),
             FPDFAnnot_GetObjNum: load_fn!(lib, "FPDFAnnot_GetObjNum"),
+            FPDFAnnot_GetFlags: load_fn!(lib, "FPDFAnnot_GetFlags"),
+            FPDFAnnot_GetObjectCount: load_fn!(lib, "FPDFAnnot_GetObjectCount"),
+            FPDFAnnot_GetObject: load_fn!(lib, "FPDFAnnot_GetObject"),
             FPDFAnnot_GetFormFieldFlags: load_fn!(lib, "FPDFAnnot_GetFormFieldFlags"),
             FPDFAnnot_GetFormFieldName: load_fn!(lib, "FPDFAnnot_GetFormFieldName"),
             FPDFAnnot_GetFormFieldAlternateName: load_fn!(
