@@ -92,6 +92,7 @@ struct PyTextItem {
     /// True when the trailing source space was synthesized by PDFium.
     #[pyo3(get)]
     trailing_space_generated: bool,
+    /// OCR confidence score (0.0-1.0). None for native PDF text.
     #[pyo3(get)]
     confidence: Option<f64>,
     /// Rotation in degrees (viewport space). Defaults to 0.
@@ -372,7 +373,7 @@ impl PyTextItem {
             stroke_color: item.stroke_color,
             char_codes: item.char_codes,
             trailing_space_generated: item.trailing_space_generated,
-            confidence: item.confidence.map(|v| v as f64).or(Some(1.0)),
+            confidence: item.confidence.map(|v| v as f64),
             rotation: item.rotation as f64,
             words: item.words.into_iter().map(PyWordBox::from_rust).collect(),
         }

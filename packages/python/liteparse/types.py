@@ -42,6 +42,7 @@ class TextItem:
     char_codes: List[int] = field(default_factory=list)
     #: True when the trailing source space was synthesized by PDFium.
     trailing_space_generated: bool = False
+    #: OCR confidence score (0.0-1.0). ``None`` for native PDF text.
     confidence: Optional[float] = None
     rotation: float = 0.0
     #: Per-word sub-boxes. Empty unless the parser was configured with
