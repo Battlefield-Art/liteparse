@@ -5,7 +5,7 @@ sidebar:
   order: 3
 ---
 
-By default, LiteParse returns text, geometry, and page metadata — nothing else. Everything a PDF *can* carry beyond that (embedded images, vector art, annotations, form fields, tagged-structure trees, per-glyph typography) is **opt-in**, behind its own flag.
+By default, LiteParse returns text, geometry, and page metadata. Everything a PDF *can* carry beyond that (embedded images, vector art, annotations, form fields, tagged-structure trees, per-glyph typography) is **opt-in**, behind its own flag.
 
 This keeps the default output shape small, stable, and cheap to produce. It also means that if you're looking for data you know is in the file and don't see it in the output, you're probably missing a flag.
 
