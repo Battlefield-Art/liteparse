@@ -44,6 +44,17 @@ pub(super) fn escape_inline(s: &str) -> String {
     out
 }
 
+/// Escape `text` for use as the body of a span with `style`. Backslash escapes
+/// are inert inside code spans per CommonMark, so mono text is passed through
+/// verbatim.
+fn style_body(text: &str, style: SpanStyle) -> String {
+    if style.mono {
+        text.to_string()
+    } else {
+        escape_inline(text)
+    }
+}
+
 /// Wrap `inner` in a markdown inline link to `url`. Uses the angle-bracket
 /// destination form when the URL contains characters that would otherwise
 /// terminate or break the `(url)` form (whitespace or parentheses).
@@ -122,7 +133,7 @@ pub(super) fn render_line_inline(line: &ProjectedLine) -> String {
         if joined.is_empty() {
             return joined;
         }
-        let escaped = escape_inline(&joined);
+        let escaped = style_body(&joined, styles[0]);
         if styles[0].is_plain() {
             return escaped;
         }
@@ -148,7 +159,7 @@ pub(super) fn render_line_inline(line: &ProjectedLine) -> String {
             group_text.push_str(span.text.trim());
         }
         let group_text = collapse_whitespace(&group_text);
-        let escaped = escape_inline(&group_text);
+        let escaped = style_body(&group_text, style);
         let mut rendered = if style.is_plain() {
             escaped
         } else {
@@ -180,7 +191,7 @@ pub(super) fn render_line_inline(line: &ProjectedLine) -> String {
 pub(super) fn render_list_item_text(line: &ProjectedLine, marker: &str, rest: &str) -> String {
     if let Some(style) = line_uniform_style(line) {
         let plain = collapse_whitespace(rest);
-        let escaped = escape_inline(&plain);
+        let escaped = style_body(&plain, style);
         return if style.is_plain() {
             escaped
         } else {
@@ -414,5 +425,43 @@ mod tests {
         // Plain spans stay unwrapped.
         assert!(out.contains("call"));
         assert!(out.contains("on it"));
+    }
+
+    #[test]
+    fn render_line_inline_mono_span_is_not_escaped() {
+        let l = styled_line(
+            &[
+                ("call", 50.0, Some("Arial")),
+                ("get_user_id", 100.0, Some("Courier")),
+                ("now", 200.0, Some("Arial")),
+            ],
+            100.0,
+            10.0,
+        );
+        let out = render_line_inline(&l);
+        assert!(out.contains("`get_user_id`"), "got: {out}");
+        assert!(!out.contains('\\'), "got: {out}");
+    }
+
+    #[test]
+    fn render_line_inline_mono_span_keeps_backslashes() {
+        let l = styled_line(
+            &[
+                ("open", 50.0, Some("Arial")),
+                (r"C:\Program\bin", 100.0, Some("Courier")),
+                ("next", 200.0, Some("Arial")),
+            ],
+            100.0,
+            10.0,
+        );
+        let out = render_line_inline(&l);
+        assert!(out.contains(r"`C:\Program\bin`"), "got: {out}");
+    }
+
+    #[test]
+    fn render_line_inline_uniform_mono_line_is_not_escaped() {
+        let l = styled_line(&[("a_b*c", 50.0, Some("Courier"))], 100.0, 10.0);
+        let out = render_line_inline(&l);
+        assert_eq!(out, "`a_b*c`");
     }
 }
