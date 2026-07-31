@@ -584,6 +584,11 @@ pub struct ProjectedLine {
     pub all_mono: bool,
     pub all_strike: bool,
     pub spans: Vec<TextItem>,
+    /// True when the line's base direction is right-to-left (strong RTL
+    /// characters outnumber strong LTR ones). `spans` is always in x-ascending
+    /// order; consumers that rebuild the line's *text* must walk it in reverse
+    /// when this is set, or labels detach from their values.
+    pub rtl: bool,
     /// Path from the page's region-tree root to the leaf containing this line.
     /// Equality means "same leaf"; prefix relationship means "one contains the
     /// other". Replaces the prior flat `column_id` scheme so nested layouts

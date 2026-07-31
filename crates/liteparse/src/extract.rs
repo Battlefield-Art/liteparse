@@ -1,3 +1,4 @@
+use crate::bidi::is_rtl_char;
 use crate::error::LiteParseError;
 use crate::glyph_names::resolve_glyph_name;
 use crate::types::{
@@ -1341,22 +1342,26 @@ fn extract_page_text_items(
             let y_overlap = vp_loose.top < seg.vp_bottom + y_tolerance
                 && vp_loose.bottom > seg.vp_top - y_tolerance;
 
-            let gap = vp_strict.left - seg.last_char_right;
+            // Gaps are measured along the segment's writing direction, so a
+            // right-to-left run reads exactly like a left-to-right one: positive
+            // means "further along the line", negative means "doubled back".
+            let gap = seg.gap_to(&vp_strict, c);
 
             // Detect line change using complementary checks:
             // 1. Strict vertical separation: char's strict top is well below last char's strict bottom
-            // 2. Line wrap: char goes back leftward AND strict top is below last char's strict bottom
-            //    (even slightly), indicating text wrapped to a new line within the same text object
-            // 3. Very large leftward jump: if the char jumps back by more than the current
+            // 2. Line wrap: char goes back against the writing direction AND strict top is below
+            //    last char's strict bottom (even slightly), indicating text wrapped to a new line
+            //    within the same text object
+            // 3. Very large backward jump: if the char jumps back by more than the current
             //    segment width, it's definitely a new line (handles OCR text with tall bounding
             //    boxes that overlap vertically between lines)
             let strict_below = vp_strict.top > seg.last_char_bottom;
-            let large_leftward_jump = gap < -5.0;
+            let large_backward_jump = gap < -5.0;
             let seg_width = seg.vp_right - seg.vp_left;
-            let very_large_leftward_jump = seg_width > 20.0 && gap < -(seg_width * 0.5);
+            let very_large_backward_jump = seg_width > 20.0 && gap < -(seg_width * 0.5);
             let line_changed = vp_strict.top > seg.last_char_bottom + y_tolerance
-                || (strict_below && large_leftward_jump)
-                || very_large_leftward_jump;
+                || (strict_below && large_backward_jump)
+                || very_large_backward_jump;
 
             // Dot leader detection: break at the boundary between dots and non-dots.
             // This prevents items like "Total . . . . 330,100" from merging.
@@ -1384,7 +1389,7 @@ fn extract_page_text_items(
                 };
                 let split = gap >= MAX_INLINE_GAP
                     || (seg.pending_space && gap > seg.avg_char_width() * 2.2);
-                let loose_gap = vp_strict.left - seg.last_char_loose_right;
+                let loose_gap = seg.loose_gap_to(&vp_strict, c);
                 let em_vp = (vp_loose.bottom - vp_loose.top).abs();
                 let space_w = ch.font_space_width().map(|w| w * em_vp).unwrap_or(-1.0);
                 eprintln!(
@@ -1429,7 +1434,7 @@ fn extract_page_text_items(
                             .is_some_and(|p| p.is_ascii_alphanumeric());
                         if prev_alnum && c.is_ascii_alphanumeric() {
                             let em_vp = (vp_loose.bottom - vp_loose.top).abs();
-                            let loose_gap = vp_strict.left - seg.last_char_loose_right;
+                            let loose_gap = seg.loose_gap_to(&vp_strict, c);
                             if em_vp > 0.0 && loose_gap > 0.0 {
                                 let s = font_space_cal.entry(fk.clone()).or_default();
                                 if s.len() < 512 {
@@ -1454,7 +1459,7 @@ fn extract_page_text_items(
                 // of the rendered em height as the space estimate.
                 let em_vp = (vp_loose.bottom - vp_loose.top).abs();
                 let space_w = ch.font_space_width().map(|w| w * em_vp).unwrap_or(0.0);
-                let loose_gap = vp_strict.left - seg.last_char_loose_right;
+                let loose_gap = seg.loose_gap_to(&vp_strict, c);
                 let both_alnum = c.is_ascii_alphanumeric()
                     && seg
                         .text
@@ -2102,6 +2107,16 @@ struct SegmentBuilder {
     last_char_right: f32,
     // Right edge of last char LOOSE bounds (advance-relative gap calculation)
     last_char_loose_right: f32,
+    // Left edges of the same boxes. Right-to-left runs (Hebrew, Arabic) advance
+    // leftward, so their trailing edge is the LEFT one; `gap_to` picks the pair
+    // that matches the segment's writing direction.
+    last_char_left: f32,
+    last_char_loose_left: f32,
+    // Writing direction of the segment, latched from its first strong-direction
+    // character. Stays `None` through leading neutrals (digits, punctuation) so
+    // a segment opening with "(" still picks up RTL from the Hebrew/Arabic
+    // letter that follows.
+    dir_rtl: Option<bool>,
     // Bottom of last char strict bounds (for line-change detection)
     last_char_bottom: f32,
     // Count of non-space characters (for avg width calculation)
@@ -2156,6 +2171,9 @@ impl SegmentBuilder {
             vp_bottom: f32::MIN,
             last_char_right: f32::MIN,
             last_char_loose_right: f32::MIN,
+            last_char_left: f32::MAX,
+            last_char_loose_left: f32::MAX,
+            dir_rtl: None,
             last_char_bottom: f32::MIN,
             char_count: 0,
             unmapped_char_count: 0,
@@ -2233,6 +2251,48 @@ impl SegmentBuilder {
         self.word_has = false;
     }
 
+    /// Gap from the segment's last character to the incoming one, measured
+    /// along the writing direction against the previous char's *trailing* edge
+    /// (its right edge for left-to-right text, its left edge for right-to-left).
+    /// Positive means the incoming char sits further along the line, negative
+    /// means it doubled back — the same sign convention in both directions, so
+    /// every threshold downstream stays direction-agnostic.
+    fn gap_to(&self, vp_strict: &RectF, c: char) -> f32 {
+        if self.dir_is_rtl(c) {
+            self.last_char_left - vp_strict.right
+        } else {
+            vp_strict.left - self.last_char_right
+        }
+    }
+
+    /// As [`gap_to`](Self::gap_to), but against the previous char's LOOSE box,
+    /// which subtracts out intra-word kerning/overhang. This is the
+    /// advance-relative gap the missing-space recovery compares to the font's
+    /// space width.
+    fn loose_gap_to(&self, vp_strict: &RectF, c: char) -> f32 {
+        if self.dir_is_rtl(c) {
+            self.last_char_loose_left - vp_strict.right
+        } else {
+            vp_strict.left - self.last_char_loose_right
+        }
+    }
+
+    /// Writing direction to use for the pair (segment tail, `c`). Falls back to
+    /// the incoming character while the segment has only seen neutrals.
+    fn dir_is_rtl(&self, c: char) -> bool {
+        self.dir_rtl.unwrap_or_else(|| is_rtl_char(c))
+    }
+
+    /// Record `c`'s contribution to the segment's writing direction. Neutral
+    /// characters (digits, punctuation, spaces) leave it untouched.
+    fn note_direction(&mut self, c: char) {
+        if is_rtl_char(c) {
+            self.dir_rtl = Some(true);
+        } else if c.is_alphabetic() {
+            self.dir_rtl = Some(false);
+        }
+    }
+
     /// Average width of non-space characters in the current segment.
     /// Prefers actual glyph widths (text_width) over bbox width, since bbox
     /// includes inter-character gaps that inflate the average and cause
@@ -2266,7 +2326,11 @@ impl SegmentBuilder {
         self.vp_bottom = vp_loose.bottom;
         self.last_char_right = vp_strict.right;
         self.last_char_loose_right = vp_loose.right;
+        self.last_char_left = vp_strict.left;
+        self.last_char_loose_left = vp_loose.left;
         self.last_char_bottom = vp_strict.bottom;
+        self.dir_rtl = None;
+        self.note_direction(c);
         self.char_count = 1;
         self.unmapped_char_count = if counts_as_unmapped(recovered, ch.has_unicode_map_error()) {
             1
@@ -2384,7 +2448,10 @@ impl SegmentBuilder {
         self.vp_bottom = self.vp_bottom.max(vp_loose.bottom);
         self.last_char_right = vp_strict.right;
         self.last_char_loose_right = vp_loose.right;
+        self.last_char_left = vp_strict.left;
+        self.last_char_loose_left = vp_loose.left;
         self.last_char_bottom = vp_strict.bottom;
+        self.note_direction(c);
         self.char_count += 1;
         if self.extract_text_metadata {
             self.char_codes.push(ch.char_code());

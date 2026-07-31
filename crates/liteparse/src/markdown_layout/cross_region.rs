@@ -228,14 +228,28 @@ fn cluster_rows<'a>(set: &[(&'a ProjectedLine, bool)], tol: f32) -> Vec<Cluster<
 /// with gap-proportional spacing, styles AND together.
 fn fuse_cluster(cluster: &Cluster, path: &[u16]) -> ProjectedLine {
     let mut members: Vec<&ProjectedLine> = cluster.members().copied().collect();
-    members.sort_by(|a, b| a.bbox.x.total_cmp(&b.bbox.x));
+    // Fuse in reading order: a right-to-left row starts at its highest x, so
+    // walking left-to-right would emit its cells backwards. `fused.spans` is
+    // re-sorted x-ascending at the end either way, keeping cell geometry intact.
+    let rtl = crate::bidi::is_rtl_pieces(members.iter().map(|m| m.text.as_str()));
+    if rtl {
+        members.sort_by(|a, b| b.bbox.x.total_cmp(&a.bbox.x));
+    } else {
+        members.sort_by(|a, b| a.bbox.x.total_cmp(&b.bbox.x));
+    }
 
     let first = members[0];
     let mut fused = first.clone();
+    fused.rtl = rtl;
     fused.region_path = path.to_vec();
     for m in &members[1..] {
-        let prev_right = fused.bbox.x + fused.bbox.width;
-        let gap = (m.bbox.x - prev_right).max(0.0);
+        // Gap to the previously-fused run, measured along the reading
+        // direction so the space count stays proportional in both.
+        let gap = if rtl {
+            (fused.bbox.x - (m.bbox.x + m.bbox.width)).max(0.0)
+        } else {
+            (m.bbox.x - (fused.bbox.x + fused.bbox.width)).max(0.0)
+        };
         let approx_char_w = (fused.dominant_font_size * 0.5).max(2.0);
         let n_spaces = ((gap / approx_char_w) as usize).clamp(2, 24);
         fused.text.push_str(&" ".repeat(n_spaces));
