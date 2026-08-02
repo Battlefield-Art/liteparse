@@ -187,9 +187,9 @@ pub fn classify_page_with_filters(
         // prose; the data region tables cleanly by itself, while the frame
         // would fuse prose into garbage cells).
         // The leaf must also hold a material share of the run. A leaf with a
-        // handful of the lines — a landscape slide's title band sitting above
+        // handful of the lines - a landscape slide's title band sitting above
         // the table, which tables "successfully" on its own as a row of
-        // gutter-split title fragments — is not evidence that the per-region
+        // gutter-split title fragments - is not evidence that the per-region
         // path has this content covered; vetoing on it drops the whole table
         // and spills its body rows into prose.
         let already_handled = groups.values().any(|idxs| {

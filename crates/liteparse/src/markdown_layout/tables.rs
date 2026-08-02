@@ -36,7 +36,7 @@ const TABLE_ROW_MIN_FILL: f32 = 0.9;
 const RULE_BAND_MIN_HEIGHT_PT: f32 = 10.0;
 
 /// A rule band with fewer lines than this is a rule under a heading or a run of
-/// hyperlink underlines — never a table.
+/// hyperlink underlines - never a table.
 const RULE_BAND_MIN_LINES: usize = 3;
 
 /// Floor for the sparse-new-row path: a partial-cell line whose bottom-gap
@@ -55,13 +55,13 @@ const TABLE_ROW_GAP_MULTIPLIER: f32 = 2.5;
 const TABLE_ROW_SPACING_MAX_CV: f32 = 0.5;
 
 /// Minimum ratio between the smallest "wide" inter-word gap and the largest
-/// ordinary one for a span's internal gaps to read as bimodal — i.e. for the
+/// ordinary one for a span's internal gaps to read as bimodal - i.e. for the
 /// wide ones to be column gutters rather than stretched justification spaces.
 ///
 /// Measured separation is large: real gutters run 3.4–4.4× the in-cell word
 /// gap (7.29 vs 2.13 on a booktabs worksheet header, 7.73 vs 1.76 on a
-/// two-column-label results table), while fully-justified prose — the one
-/// thing that reliably counterfeits column structure — tops out around 1.3×.
+/// two-column-label results table), while fully-justified prose - the one
+/// thing that reliably counterfeits column structure - tops out around 1.3×.
 const SPAN_GUTTER_MIN_RATIO: f32 = 2.5;
 
 /// Absolute floor (points) on a gap treated as an in-span column gutter, so
@@ -75,7 +75,7 @@ pub(super) struct SpanPiece<'a> {
     pub(super) x: f32,
     pub(super) end_x: f32,
     pub(super) text: String,
-    /// The run this piece came from — for bold/font lookups.
+    /// The run this piece came from - for bold/font lookups.
     pub(super) span: &'a TextItem,
     /// The piece's own word boxes, in reading order, but **only** when they
     /// were verified to reconstruct `text` exactly. Empty otherwise, so a
@@ -83,22 +83,6 @@ pub(super) struct SpanPiece<'a> {
     pub(super) words: Vec<&'a crate::types::WordBox>,
 }
 
-/// Split one PDFium run into column pieces at its internal gutters.
-///
-/// PDFium routinely emits a whole table row — several cells — as a single run,
-/// which is the root of the track chicken-and-egg: the detector needs tracks to
-/// split runs, but the runs are where the track evidence lives. Word boxes
-/// break the cycle, because the gutter is plainly visible in the geometry
-/// before any table hypothesis exists.
-///
-/// Detection is *relative to the run itself*, never a constant threshold: sort
-/// the inter-word gaps, find the largest ratio jump, and accept the split only
-/// when that jump clears [`SPAN_GUTTER_MIN_RATIO`]. A fixed gap threshold
-/// cannot work here — the same 4pt gap is a gutter in 6pt type and an ordinary
-/// space in 12pt type.
-///
-/// Returns a single piece covering the whole run when it has no word boxes,
-/// fewer than three words, or no bimodal gap.
 /// A run's own word boxes, in reading order, but only when they reconstruct the
 /// run's text exactly. Anything less and the boxes can't be used to slice the
 /// text, because the split points wouldn't correspond to it.
@@ -125,23 +109,39 @@ pub(super) fn verified_words(span: &TextItem) -> Option<Vec<&crate::types::WordB
     (rebuilt == collapse_whitespace(span.text.trim())).then_some(words)
 }
 
+/// Split one PDFium run into column pieces at its internal gutters.
+///
+/// PDFium routinely emits a whole table row (several cells) as a single run,
+/// which is the root of the track chicken-and-egg: the detector needs tracks to
+/// split runs, but the runs are where the track evidence lives. Word boxes
+/// break the cycle, because the gutter is plainly visible in the geometry
+/// before any table hypothesis exists.
+///
+/// Detection is *relative to the run itself*, never a constant threshold: sort
+/// the inter-word gaps, find the largest ratio jump, and accept the split only
+/// when that jump clears [`SPAN_GUTTER_MIN_RATIO`]. A fixed gap threshold
+/// cannot work here: the same 4pt gap is a gutter in 6pt type and an ordinary
+/// space in 12pt type.
+///
+/// Returns a single piece covering the whole run when it has no word boxes,
+/// fewer than three words, or no bimodal gap.
 pub(super) fn split_span_at_gutters(span: &TextItem) -> Vec<SpanPiece<'_>> {
-    let verified_list = verified_words(span);
-    let words: Vec<&crate::types::WordBox> = verified_list.clone().unwrap_or_default();
-    let verified = verified_list.is_some();
+    // Unverified word boxes leave `words` empty, so `whole()` then carries no
+    // word geometry, exactly as the `SpanPiece::words` contract requires.
+    let words: Vec<&crate::types::WordBox> = verified_words(span).unwrap_or_default();
     let whole = || {
         vec![SpanPiece {
             x: span.x,
             end_x: span.x + span.width.max(0.0),
             text: collapse_whitespace(span.text.trim()),
             span,
-            words: if verified { words.clone() } else { Vec::new() },
+            words: words.clone(),
         }]
     };
-    // Two words give exactly one gap, which is trivially "the largest" — no
+    // Two words give exactly one gap, which is trivially "the largest": no
     // ratio to test against, so there is no evidence of bimodality. The piece
     // still carries its words, so a track-driven split can use them later.
-    if words.len() < 3 || !verified {
+    if words.len() < 3 {
         return whole();
     }
 
@@ -605,7 +605,7 @@ fn cells_from_raw_items_with_tracks(
 /// single piece spanning multiple tracks is almost always prose (a wrapped
 /// paragraph whose x-range merely overlaps the track region), and shredding it
 /// at whitespace anchors corrupts the body text. It is only safe where the row
-/// is known to be inside a table already — a rule band whose second column is
+/// is known to be inside a table already - a rule band whose second column is
 /// blank, where every body row legitimately has one piece.
 fn cells_from_raw_items_with_tracks_opt(
     line: &ProjectedLine,
@@ -735,13 +735,13 @@ fn is_value_like(text: &str) -> bool {
 ///
 /// This is the geometric counterpart of [`split_text_at_x_anchors`], which can
 /// only *interpolate* an x from a character index and so assumes every glyph is
-/// the same width — false for any proportional font, and the reason a split can
+/// the same width - false for any proportional font, and the reason a split can
 /// land one character off (`10 .1%`). Prefer this whenever the piece carries
 /// verified word boxes.
 ///
 /// Returns `None` when there are too few words to host every anchor, when two
 /// anchors want the same boundary, or when an anchor's nearest boundary is
-/// further away than the track tolerance — a miss that large means no word
+/// further away than the track tolerance - a miss that large means no word
 /// actually starts at this column, so the caller should fall back rather than
 /// cut where the geometry says nothing happens.
 fn split_words_at_x_anchors(
@@ -888,7 +888,7 @@ fn finalize_table_run(
         return None;
     }
     // A header with no body is not a table. Reachable only via the bold-first-row
-    // promotion, which consumes rows[0] — harmless before the two-row relaxation,
+    // promotion, which consumes rows[0] - harmless before the two-row relaxation,
     // but with it rows[0] can be the *only* row.
     if body_rows.is_empty() {
         return None;
@@ -914,7 +914,7 @@ fn finalize_table_run(
 /// `allow_two_row` relaxes the two body-length gates below so a header row plus
 /// a *single* data row can form a table. Only ever set by the last-resort second
 /// pass in `detect_tables_impl`, which runs exclusively in regions where the
-/// normal pass found no table at all — see the comment there for why relaxing
+/// normal pass found no table at all - see the comment there for why relaxing
 /// these gates globally is unsafe.
 fn try_detect_table_inferred(
     lines: &[ProjectedLine],
@@ -1128,14 +1128,13 @@ fn try_detect_table_inferred(
 /// that reliably counterfeits it: **fully-justified prose**. Justification
 /// stretches inter-word spaces until they read as column gutters, so any two
 /// consecutive lines of a justified paragraph infer clean tracks and shred into
-/// `| when travelling | to | conflict | zones, | more |`. Measured cost of not
-/// gating this: −0.0030 NID across 14 documents.
+/// `| when travelling | to | conflict | zones, | more |`.
 ///
 /// Two signals separate the real thing from the counterfeit:
 ///
 /// 1. **Isolation.** A real 2-row table is surrounded by whitespace. A prose
 ///    pair is mid-paragraph, so its neighbours are table-adjacent lines.
-/// 2. **Header shape.** Header cells are labels — they start with a capital or
+/// 2. **Header shape.** Header cells are labels: they start with a capital or
 ///    a digit and don't trail mid-sentence punctuation. Prose "headers" are
 ///    lowercase words, often ending in a comma.
 fn two_row_run_plausible(lines: &[ProjectedLine], run: &TableRun) -> bool {
@@ -1393,7 +1392,7 @@ fn absorb_header_lines(
         //
         // Prose carries whitespace everywhere, so recovery "succeeds" on a
         // paragraph sitting above the table just as readily as on a real
-        // header — manufacturing a header out of prose and dragging the
+        // header - manufacturing a header out of prose and dragging the
         // paragraph into the table. Cell count can't separate them (a projected
         // prose line splits on its own internal gaps), but length can: header
         // labels are terse, shredded prose is not.
@@ -1474,7 +1473,7 @@ pub(super) fn detect_tables(lines: &[ProjectedLine]) -> Vec<TableRun> {
 /// `detect_tables` plus the booktabs rule-band pass: a table drawn as nothing
 /// but a top and bottom hairline has no grid for the ruled detector and, when
 /// it has only two columns, is below `TABLE_MIN_COLUMNS` for the borderless
-/// one. The rules themselves are the missing evidence — see `rule_bands`.
+/// one. The rules themselves are the missing evidence - see `rule_bands`.
 pub(super) fn detect_tables_banded(
     lines: &[ProjectedLine],
     graphics: &[GraphicPrimitive],
@@ -1492,8 +1491,8 @@ pub(super) fn detect_tables_banded(
 /// them, i.e. the top and bottom of a table drawn without a grid.
 ///
 /// Requires the two rules to overlap in x (they bound the same block), to sit
-/// far enough apart to hold rows but not so far as to be page furniture, and —
-/// crucially — to have **no vertical rule crossing between them**. A band with
+/// far enough apart to hold rows but not so far as to be page furniture, and -
+/// crucially - to have **no vertical rule crossing between them**. A band with
 /// verticals is a real grid, and the ruled detector owns it.
 fn rule_bands(graphics: &[GraphicPrimitive], page_height: f32) -> Vec<(f32, f32)> {
     let (hs, vs) = extract_h_v_segments(graphics);
@@ -1523,7 +1522,7 @@ fn rule_bands(graphics: &[GraphicPrimitive], page_height: f32) -> Vec<(f32, f32)
 
 /// Last-resort pass for two-column tables enclosed in a rule band.
 ///
-/// Modelled on `two_row_second_pass` and gated the same way — only in the index
+/// Modelled on `two_row_second_pass` and gated the same way - only in the index
 /// gaps where the normal pass found nothing, and only for runs that stay inside
 /// the gap. The extra requirement is that the seed line lie inside a band and
 /// that the band hold enough lines to be a table rather than a rule under a
@@ -1562,8 +1561,7 @@ fn two_col_band_pass(
         // Detect against the band's lines alone: a run can then never reach
         // past the rules that are the whole justification for relaxing
         // `TABLE_MIN_COLUMNS` here.
-        let sub: Vec<ProjectedLine> = lines[bs..be].to_vec();
-        if let Some(mut run) = try_detect_table_inferred(&sub, 0, 0, false, true) {
+        if let Some(mut run) = try_detect_table_inferred(&lines[bs..be], 0, 0, false, true) {
             run.start += bs;
             run.end += bs;
             run.body_start += bs;
@@ -1666,8 +1664,7 @@ fn detect_tables_impl(lines: &[ProjectedLine], include_desc_lists: bool) -> Vec<
 /// Some real tables are a header row plus exactly one data row. Both length
 /// gates in `try_detect_table_inferred` reject them. Relaxing those gates
 /// *directly* is not safe: a 2-row run forms early, higher up the page, and
-/// consumes the header of the real multi-row table below it (doc 197 gains
-/// +0.789 that way but doc 147 loses −0.822, plus ~8 NID regressions).
+/// consumes the header of the real multi-row table below it.
 ///
 /// So instead we keep the normal pass exactly as-is and only retry, with the
 /// relaxation on, inside the index gaps where it found *no* table at all. By
@@ -2960,14 +2957,13 @@ const TABLE_MAX_PAGE_COVERAGE: f32 = 0.95;
 const RULED_HLINE_MIN_COVERAGE: f32 = 0.5;
 
 /// Minimum fraction of the component's row extent a vertical rule must span to
-/// count as a column boundary — the mirror image of `RULED_HLINE_MIN_COVERAGE`.
+/// count as a column boundary, the mirror image of `RULED_HLINE_MIN_COVERAGE`.
 ///
 /// Slide decks routinely draw a table as one stroked rect per cell, so a single
 /// decorative highlight box behind a phrase *inside* a cell contributes a pair
-/// of vertical edges that split that column in two for the whole table (doc 200:
-/// a 21.6×9.4pt box at x=336.9 shredded a 210pt-wide `Explanation` column and
-/// took the grid from 4 columns to 6). `collapse_gutter_columns` can't fuse the
-/// sliver back because text centres do land inside it.
+/// of vertical edges that split that column in two for the whole table.
+/// `collapse_gutter_columns` can't fuse the sliver back because text centres do
+/// land inside it.
 ///
 /// Kept well below the horizontal counterpart: a genuine divider that rules only
 /// the header band of an otherwise open table is a real layout, and must survive.
@@ -3697,7 +3693,7 @@ fn merge_stacked_header(
 
 /// Density gate: a grid that is mostly empty cells is rejected unless it shows
 /// strong table evidence. Cells the rules say are vertically merged into the
-/// cell above (`spanned`) don't count as empty at all — they are empty by
+/// cell above (`spanned`) don't count as empty at all - they are empty by
 /// construction, and a rowspan label column ("1. Embodying sustainability
 /// values" beside three competence rows) otherwise reads as a sparse grid and
 /// dies here. Beyond that, three escape hatches keep real tables:
@@ -3720,7 +3716,7 @@ fn merge_stacked_header(
 ///
 /// This is the geometric explanation for legitimately-empty cells. Every
 /// interior `ys` boundary exists because *some* horizontal segment sits there,
-/// so a column only scores when that particular rule stops short of it — which
+/// so a column only scores when that particular rule stops short of it - which
 /// is exactly how a PDF draws a merged cell. A fully-ruled grid scores zero.
 fn rowspan_mask(
     hs: &[HSeg],
@@ -3737,7 +3733,7 @@ fn rowspan_mask(
         let row = r + 1;
         // Some vertical rule must run *through* the boundary. That is what
         // distinguishes "the grid continues, this one cell is merged" from
-        // "the grid ended here" — a page-frame component whose stray rules
+        // "the grid ended here" - a page-frame component whose stray rules
         // cross unruled prose has no vertical continuing past them, and
         // forgiving its empties would turn body text into a two-column table.
         let grid_continues = v_indices
@@ -3780,7 +3776,7 @@ fn passes_density_gate(
     let total = n_rows * n_cols;
     // A spanned cell only excuses itself when the cell it is merged into
     // actually holds text. Walk up the run of merged cells to its head: an
-    // empty head means nothing was merged here, just an unruled hole — the
+    // empty head means nothing was merged here, just an unruled hole - the
     // shape a chart's vertical gridlines make, where forgiving the empties
     // would turn a plot into a 27-column table.
     let merged_into_text = |r: usize, c: usize| {
@@ -3858,16 +3854,16 @@ fn passes_density_gate(
 /// whole page (likely the page border), or is mostly empty cells.
 /// Fuse "gutter" column boundaries left behind by paired cell-border edges.
 ///
-/// A bordered cell contributes two vertical edges — its own right edge and the
-/// next cell's left edge — separated by the table's inter-cell padding.
+/// A bordered cell contributes two vertical edges - its own right edge and the
+/// next cell's left edge - separated by the table's inter-cell padding.
 /// `TABLE_COL_BOUNDARY_CLUSTER_PT` fuses the tight pairs (4-6pt), but a
 /// generously padded table puts 15-25pt between them, leaving a sliver column
 /// between every real column. Those slivers double the column count, and
 /// because `split_span_at_anchors` shreds text into them they are *not* empty,
-/// so `collapse_phantom_cols` can't remove them — the grid then fails the
+/// so `collapse_phantom_cols` can't remove them - the grid then fails the
 /// empty-cell gate and a perfectly good table is thrown away.
 ///
-/// Width alone can't identify them — plenty of real tables carry a genuinely
+/// Width alone can't identify them - plenty of real tables carry a genuinely
 /// narrow column (a `#` or `No.` column beside a wide description). What marks
 /// a sliver is that **no text center ever lands inside it**: text steps over a
 /// gutter, but a narrow real column still holds its own values. So fuse a
@@ -3960,27 +3956,24 @@ fn filter_short_vlines(
 ///
 /// A table drawn with interior dividers but no outer frame gives `xs` that stop
 /// at the first and last vertical rule, so its outermost columns are missing
-/// entirely — every line in them reads as overhang and the component collapses
-/// (doc 182: a 4×4 table came out as the 2×2 grid its interior rules describe,
-/// and all 31 lines tripped the overhang guard). The evidence is already on the
-/// page: the horizontal rules know how wide the table is, and the verticals know
-/// how tall.
+/// entirely: every line in them reads as overhang and the component collapses.
+/// The evidence is already on the page: the horizontal rules know how wide the
+/// table is, and the verticals know how tall.
 ///
-/// Two guards, both load-bearing:
+/// Three guards, all load-bearing:
 ///   - **median, not min/max** of the perpendicular rules, so one overshooting
 ///     stroke cannot widen the grid;
 ///   - **the new outer band must hold text**, the same idiom
-///     `collapse_gutter_columns` uses — otherwise a pen-cap overshoot or a
+///     `collapse_gutter_columns` uses; otherwise a pen-cap overshoot or a
 ///     full-width section rule manufactures an empty outer column;
 ///   - **the band must be at least `min_band` wide/tall.** Callers pass the
 ///     smallest existing row height for the row axis: verticals routinely
 ///     overrun the last horizontal by a few points, and a band shorter than any
-///     real row is that overshoot, not a row (doc 45: a 15.5pt tail on 26pt
-///     rows added a phantom row, which was enough for the ruled grid to outrank
-///     a better borderless table and merge five rows into one, TEDS -0.50).
-///     The column axis passes only the clustering tolerance, because an unruled
-///     *label* column is both common and legitimately much narrower than the
-///     ruled data columns it sits beside (doc 182's is 94pt against 259pt).
+///     real row is that overshoot, not a row. A phantom row here is enough for
+///     the ruled grid to outrank a better borderless table. The column axis
+///     passes only the clustering tolerance, because an unruled *label* column
+///     is both common and legitimately much narrower than the ruled data
+///     columns it sits beside.
 fn extend_to_perpendicular_extent(
     axis: &mut Vec<f32>,
     perp_los: &[f32],
@@ -4020,20 +4013,11 @@ fn extend_to_perpendicular_extent(
 ///
 /// Runs `build_ruled_table_from` twice when short vertical rules are present:
 /// once on the rules as drawn, once with the stubs filtered out. The unfiltered
-/// build is the gatekeeper — **the filtered result is only ever allowed to
-/// replace a table that would have been produced anyway**. That ordering is
-/// load-bearing, and each of the three cases below was found by a document the
-/// cheaper "just filter first" version broke:
-///   - doc 71 — the filter left a bar chart with one column, so the grid was
-///     rejected and its gridlines were released to be emitted as thematic
-///     breaks instead (MHS 0.98 -> 0.62);
-///   - doc 70 — a pie chart's short callout rules were dropped, turning a grid
-///     the density gate had rejected into a junk 2-column table (NID -0.10);
-///   - ParseBench `FBLB-134215544_page88` — dropping a single 4%-coverage stub
-///     out of 20 rules flipped a rejected component into an 11-column table
-///     that swallowed the whole page (composite 0.66 -> 0.03).
-/// Raising the fallback threshold patched each of these one at a time and kept
-/// finding new ones; requiring the unfiltered build to succeed kills the class.
+/// build is the gatekeeper: **the filtered result is only ever allowed to
+/// replace a table that would have been produced anyway**. Filtering first
+/// instead lets the filter *remove the evidence the gates reject junk on*: a
+/// chart loses the very rules that made it too sparse or too small to pass,
+/// and a rejected component flips into an accepted junk table.
 fn build_ruled_table(
     hs: &[HSeg],
     vs: &[VSeg],
@@ -4072,10 +4056,9 @@ fn build_ruled_table(
     );
     // Take the refined grid only when dropping the stubs measurably stopped the
     // boundaries cutting through text. A stub that sits on a *real* column edge
-    // is the common case in dense financial tables — there the straddle census
-    // is unchanged and dropping the rule just loses a column (ParseBench
-    // `corp-q1-2025_page10`: a 2.5pt rule at x=451.25 was the only evidence for
-    // a boundary, and merging that column away cost 0.73 -> 0.33).
+    // is the common case in dense financial tables; there the straddle census
+    // is unchanged, and dropping a rule that was the only evidence for its
+    // boundary just merges a real column away.
     match retry {
         Some(r) if r.2 < base.2 - STRADDLE_IMPROVEMENT => {
             if dbg {
@@ -4094,8 +4077,8 @@ fn build_ruled_table(
 }
 
 /// How much the straddle fraction must fall for the short-vline refinement to
-/// be worth taking. Doc 200's phantom column drops it 0.33 -> 0.03; a stub on a
-/// real column edge leaves it flat.
+/// be worth taking. Removing a genuine phantom column drops it by an order of
+/// magnitude; a stub on a real column edge leaves it flat.
 const STRADDLE_IMPROVEMENT: f32 = 0.05;
 
 #[allow(clippy::too_many_arguments)]
@@ -4403,7 +4386,7 @@ fn dedup_close(v: &mut Vec<f32>, tol: f32) {
 ///
 /// This replaces guessing a split point from a character index: with word boxes
 /// the answer is simply which cell each word sits in. Returns `None` when the
-/// run has no verified word geometry, or when every word lands in one column —
+/// run has no verified word geometry, or when every word lands in one column -
 /// in that case the caller's whole-span fallbacks are the honest answer, since
 /// the run only *overlaps* the neighbouring cell (padding, an overhanging
 /// descender) rather than genuinely spanning it.
@@ -4509,14 +4492,11 @@ struct GridBand {
 /// Split one grid component at row bands that no vertical rule actually spans.
 ///
 /// `cluster_v_segments` merges same-x verticals by taking the *union* of their
-/// y-ranges with no gap check, so two tables stacked in one column — each
-/// drawing its own short strokes at the same left edge — fuse into a single
+/// y-ranges with no gap check, so two tables stacked in one column, each
+/// drawing its own short strokes at the same left edge, fuse into a single
 /// component. Each table is then evaluated with all of the other's rows empty
 /// and dies on `TABLE_MAX_EMPTY_CELL_FRACTION`, and when the two tables have
-/// different layouts their column sets are unioned too, over-segmenting both
-/// (docs 81-84: one 113pt band of blank page between two tables cost every one
-/// of them its structure, and doc 81's `Number | of clauses` split across two
-/// columns comes from the same union).
+/// different layouts their column sets are unioned too, over-segmenting both.
 ///
 /// The cut signal is geometric and needs no threshold on emptiness: a band
 /// between consecutive horizontals that **no raw, pre-cluster `VSeg` spans**.
@@ -4529,7 +4509,7 @@ fn split_component_at_grid_gaps(
     h_idx: &[usize],
     v_idx: &[usize],
 ) -> Vec<GridBand> {
-    /// Row pitch below this means the component is decoration, not a table —
+    /// Row pitch below this means the component is decoration, not a table -
     /// vector-drawn maths glyphs make components with a 3-4pt pitch.
     const MIN_PITCH_PT: f32 = 8.0;
     /// A gap must dwarf the component's own row pitch *and* clear an absolute
@@ -4774,18 +4754,17 @@ pub(super) fn merge_table_runs(
 /// |           |  | and how they connect ● To understand the importance of the 3 Rs |
 /// ```
 ///
-/// We long treated this as unsolvable, and *as geometry* it is: the gap between
-/// a wrapped line and a genuine next row is the same gap. But it is tractable
-/// once the grid exists, from the text alone — which is what pdf-inspector does
-/// and where most of our remaining structure-only TEDS loss sits.
+/// As geometry this is unsolvable: the gap between a wrapped line and a genuine
+/// next row is the same gap. But once the grid exists it is tractable from the
+/// text alone.
 ///
 /// A row is a continuation of its predecessor when all of these hold:
 ///
 /// - it has the same width and an **empty first cell** (the row label lives on
 ///   the first line of the row and is never repeated);
-/// - its filled columns are a **subset** of the predecessor's filled columns —
+/// - its filled columns are a **subset** of the predecessor's filled columns:
 ///   a continuation can only extend cells that already have text;
-/// - it carries **no value-like cell** — numbers don't soft-wrap, so a
+/// - it carries **no value-like cell**; numbers don't soft-wrap, so a
 ///   blank-label row holding one is a real data row (typically a `Total`);
 /// - at least one extended cell reads as a soft wrap rather than a fresh
 ///   sentence after a completed one.
@@ -4795,12 +4774,11 @@ fn merge_continuation_rows(rows: &mut Vec<Vec<String>>) {
     }
     // The whole rule keys off "empty first cell", which only means "wrapped
     // line" when the first column is a *label* column. Plenty of tables just
-    // have a sparse first column — a timetable whose `Notes` column is blank on
+    // have a sparse first column: a timetable whose `Notes` column is blank on
     // every run, a size chart, a hierarchical header. There, every row looks
-    // like a continuation and the table collapses into a single row (measured:
-    // one 37-row timetable went 0.859 -> 0.006 GriTS). Requiring the first
-    // column to be populated in at least half the rows separates the two, and
-    // is what keeps this net-neutral on ParseBench's table corpus.
+    // like a continuation and the table collapses into a single row. Requiring
+    // the first column to be populated in at least half the rows separates the
+    // two.
     let first_col_filled = rows
         .iter()
         .filter(|r| r.first().is_some_and(|c| !c.trim().is_empty()))
@@ -4849,7 +4827,7 @@ fn is_continuation_row(prev: &[String], cur: &[String]) -> bool {
         return false;
     }
     // Numbers never soft-wrap. A blank-label row carrying any value-like cell is
-    // a real data row — most often a `Total` line, whose label column is blank
+    // a real data row - most often a `Total` line, whose label column is blank
     // precisely because it isn't the row's own label. Vetoing on *any* value
     // (not all of them) is what separates it from a genuine wrap, since such
     // rows pair a short summary word with the figures.
@@ -4863,7 +4841,7 @@ fn is_continuation_row(prev: &[String], cur: &[String]) -> bool {
 
 /// Whether `cur` reads as the tail of `prev` rather than a new statement. The
 /// only shape we reject is a fresh capitalised sentence following a cell that
-/// already closed with terminal punctuation — that is a sub-row, not a wrap.
+/// already closed with terminal punctuation - that is a sub-row, not a wrap.
 fn cell_continues(prev: &str, cur: &str) -> bool {
     let starts_new_sentence = cur
         .chars()
@@ -4938,7 +4916,7 @@ mod tests {
 
     #[test]
     fn justified_prose_does_not_split() {
-        // Justification stretches spaces to 3.4pt against a 2.73pt norm — a
+        // Justification stretches spaces to 3.4pt against a 2.73pt norm - a
         // 1.25× jump, far under the bimodality bar. This is the counterfeit the
         // ratio test exists to reject.
         let span = run_with_words(&[
@@ -5153,7 +5131,7 @@ mod tests {
     }
 
     /// Four full-height dividers plus one short pair from a highlight box drawn
-    /// inside a cell — the doc-200 shape.
+    /// inside a cell - the doc-200 shape.
     fn vlines_with_intruder() -> (Vec<HSeg>, Vec<VSeg>) {
         let hs = (0..5)
             .map(|r| HSeg {
@@ -5220,7 +5198,7 @@ mod tests {
 
     #[test]
     fn outer_band_shorter_than_any_row_is_rule_overshoot() {
-        // Verticals overrun the last horizontal by 15.5pt on 26pt rows — a tail,
+        // Verticals overrun the last horizontal by 15.5pt on 26pt rows - a tail,
         // not a row.
         let mut ys = vec![181.4, 207.8, 234.2];
         extend_to_perpendicular_extent(&mut ys, &[181.4], &[249.7], 26.4, |_, _| true);
@@ -5287,7 +5265,7 @@ mod tests {
 
     #[test]
     fn rowspan_mask_ignores_boundary_where_grid_ends() {
-        // No vertical crosses y=20, so the grid simply stops there — nothing is
+        // No vertical crosses y=20, so the grid simply stops there - nothing is
         // merged, and forgiving these empties would let a page frame shred
         // prose into columns.
         let hs = vec![
