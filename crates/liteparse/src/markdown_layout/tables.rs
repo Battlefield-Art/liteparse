@@ -4495,6 +4495,124 @@ pub fn detect_table_rects(
     out
 }
 
+/// One band of a grid component after splitting, with the vertical rules
+/// clipped to the band's own y-range.
+struct GridBand {
+    h_idx: Vec<usize>,
+    v_idx: Vec<usize>,
+    /// A copy of the page's `vs` whose y-extents are clamped to this band, so
+    /// the shared spine rule cannot carry the neighbouring table's height into
+    /// `filter_short_vlines` or `extend_to_perpendicular_extent`.
+    vs: Vec<VSeg>,
+}
+
+/// Split one grid component at row bands that no vertical rule actually spans.
+///
+/// `cluster_v_segments` merges same-x verticals by taking the *union* of their
+/// y-ranges with no gap check, so two tables stacked in one column — each
+/// drawing its own short strokes at the same left edge — fuse into a single
+/// component. Each table is then evaluated with all of the other's rows empty
+/// and dies on `TABLE_MAX_EMPTY_CELL_FRACTION`, and when the two tables have
+/// different layouts their column sets are unioned too, over-segmenting both
+/// (docs 81-84: one 113pt band of blank page between two tables cost every one
+/// of them its structure, and doc 81's `Number | of clauses` split across two
+/// columns comes from the same union).
+///
+/// The cut signal is geometric and needs no threshold on emptiness: a band
+/// between consecutive horizontals that **no raw, pre-cluster `VSeg` spans**.
+/// That is strictly stronger than "a big gap", and it distinguishes this from a
+/// rowspan, where the vertical does continue through the boundary.
+fn split_component_at_grid_gaps(
+    hs: &[HSeg],
+    vs: &[VSeg],
+    raw_vs: &[VSeg],
+    h_idx: &[usize],
+    v_idx: &[usize],
+) -> Vec<GridBand> {
+    /// Row pitch below this means the component is decoration, not a table —
+    /// vector-drawn maths glyphs make components with a 3-4pt pitch.
+    const MIN_PITCH_PT: f32 = 8.0;
+    /// A gap must dwarf the component's own row pitch *and* clear an absolute
+    /// floor, so ordinary row-height variation never cuts.
+    const GAP_PITCH_MULT: f32 = 2.5;
+    const GAP_MIN_PT: f32 = 30.0;
+    /// Each side must keep a real table: 3 boundaries is 2 rows, the minimum
+    /// `build_ruled_table` will look at.
+    const MIN_BAND_HLINES: usize = 3;
+
+    let whole = || {
+        vec![GridBand {
+            h_idx: h_idx.to_vec(),
+            v_idx: v_idx.to_vec(),
+            vs: vs.to_vec(),
+        }]
+    };
+    let mut sorted = h_idx.to_vec();
+    sorted.sort_by(|&a, &b| hs[a].y.total_cmp(&hs[b].y));
+    if sorted.len() < MIN_BAND_HLINES * 2 {
+        return whole();
+    }
+    let mut pitches: Vec<f32> = sorted.windows(2).map(|w| hs[w[1]].y - hs[w[0]].y).collect();
+    pitches.sort_by(f32::total_cmp);
+    let pitch = pitches[pitches.len() / 2];
+    if pitch < MIN_PITCH_PT {
+        return whole();
+    }
+    let min_gap = (pitch * GAP_PITCH_MULT).max(GAP_MIN_PT);
+
+    let tol = TABLE_CROSS_TOLERANCE_PT;
+    let mut cuts: Vec<usize> = Vec::new(); // index into `sorted`: cut after this line
+    for (i, w) in sorted.windows(2).enumerate() {
+        let (lo, hi) = (hs[w[0]].y, hs[w[1]].y);
+        if hi - lo < min_gap {
+            continue;
+        }
+        let spanned = raw_vs
+            .iter()
+            .any(|v| v.y_min <= lo + tol && v.y_max >= hi - tol);
+        if !spanned {
+            cuts.push(i + 1);
+        }
+    }
+    if cuts.is_empty() {
+        return whole();
+    }
+
+    let mut bounds = vec![0usize];
+    bounds.extend(cuts);
+    bounds.push(sorted.len());
+    if bounds.windows(2).any(|b| b[1] - b[0] < MIN_BAND_HLINES) {
+        return whole(); // a sliver on one side: the cut is not describing two tables
+    }
+
+    bounds
+        .windows(2)
+        .map(|b| {
+            let band = &sorted[b[0]..b[1]];
+            let y_lo = hs[band[0]].y;
+            let y_hi = hs[band[band.len() - 1]].y;
+            let v_idx: Vec<usize> = v_idx
+                .iter()
+                .copied()
+                .filter(|&i| vs[i].y_max > y_lo + tol && vs[i].y_min < y_hi - tol)
+                .collect();
+            let vs: Vec<VSeg> = vs
+                .iter()
+                .map(|v| VSeg {
+                    x: v.x,
+                    y_min: v.y_min.max(y_lo),
+                    y_max: v.y_max.min(y_hi),
+                })
+                .collect();
+            GridBand {
+                h_idx: band.to_vec(),
+                v_idx,
+                vs,
+            }
+        })
+        .collect()
+}
+
 /// Detect ruled-grid tables on a page from its vector graphics. Returns runs
 /// in document order (sorted by `start`).
 fn detect_ruled_tables_impl(
@@ -4504,26 +4622,28 @@ fn detect_ruled_tables_impl(
     page_height: f32,
     pass: RuledPass,
 ) -> Vec<(TableRun, Vec<usize>)> {
-    let (hs, vs) = extract_h_v_segments(graphics);
+    let (hs, raw_vs) = extract_h_v_segments(graphics);
     let hs = cluster_h_segments(hs);
-    let vs = cluster_v_segments(vs);
+    let vs = cluster_v_segments(raw_vs.clone());
     if hs.len() < 2 || vs.len() < 2 {
         return Vec::new();
     }
     let components = find_grid_components(&hs, &vs);
     let mut out = Vec::new();
     for (h_idx, v_idx) in components {
-        if let Some(run) = build_ruled_table(
-            &hs,
-            &vs,
-            &h_idx,
-            &v_idx,
-            lines,
-            page_width,
-            page_height,
-            pass,
-        ) {
-            out.push(run);
+        for band in split_component_at_grid_gaps(&hs, &vs, &raw_vs, &h_idx, &v_idx) {
+            if let Some(run) = build_ruled_table(
+                &hs,
+                &band.vs,
+                &band.h_idx,
+                &band.v_idx,
+                lines,
+                page_width,
+                page_height,
+                pass,
+            ) {
+                out.push(run);
+            }
         }
     }
     out.sort_by_key(|(r, _)| r.start);
