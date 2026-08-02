@@ -1076,7 +1076,35 @@ fn absorb_header_lines(
     let mut j = start_idx;
     while j > floor {
         let cand = j - 1;
-        let cells = split_cells(&lines[cand]);
+        let mut cells = split_cells(&lines[cand]);
+        // PDFium routinely emits a header row's words as one merged text run,
+        // so an 8-column table arrives with a 2-cell header whose second cell
+        // spans seven tracks. `match_track_idx` below can only bind that blob
+        // to a single column, collapsing the whole header band into one cell.
+        // Body rows already get merged-run recovery; headers need it too.
+        //
+        // Prose carries whitespace everywhere, so recovery "succeeds" on a
+        // paragraph sitting above the table just as readily as on a real
+        // header — manufacturing a header out of prose and dragging the
+        // paragraph into the table. Cell count can't separate them (a projected
+        // prose line splits on its own internal gaps), but length can: header
+        // labels are terse, shredded prose is not.
+        //
+        // Restricted to the first candidate (the line directly above the body):
+        // a merged-run header is a single line, whereas letting recovery
+        // track-align line after line lets absorption climb an entire
+        // paragraph, one plausible-looking row at a time.
+        if absorbed.is_empty() && cells.len() < column_count {
+            const HEADER_MAX_CELL_CHARS: usize = 30;
+            let tracks: Vec<f32> = track_ranges.iter().map(|r| r.0).collect();
+            if let Some(recovered) = recover_merged_cell(cells.clone(), &tracks)
+                && recovered
+                    .iter()
+                    .all(|c| c.text.chars().count() <= HEADER_MAX_CELL_CHARS)
+            {
+                cells = recovered;
+            }
+        }
         if dbgt {
             let texts: Vec<&str> = cells.iter().map(|c| c.text.as_str()).collect();
             eprintln!(
@@ -3246,6 +3274,80 @@ fn passes_density_gate(
 /// Build a `TableRun` for one ruled-grid component. Returns `None` if the
 /// resulting grid is too small (< 2 cols or < 2 rows), covers nearly the
 /// whole page (likely the page border), or is mostly empty cells.
+/// Fuse "gutter" column boundaries left behind by paired cell-border edges.
+///
+/// A bordered cell contributes two vertical edges — its own right edge and the
+/// next cell's left edge — separated by the table's inter-cell padding.
+/// `TABLE_COL_BOUNDARY_CLUSTER_PT` fuses the tight pairs (4-6pt), but a
+/// generously padded table puts 15-25pt between them, leaving a sliver column
+/// between every real column. Those slivers double the column count, and
+/// because `split_span_at_anchors` shreds text into them they are *not* empty,
+/// so `collapse_phantom_cols` can't remove them — the grid then fails the
+/// empty-cell gate and a perfectly good table is thrown away.
+///
+/// Width alone can't identify them — plenty of real tables carry a genuinely
+/// narrow column (a `#` or `No.` column beside a wide description). What marks
+/// a sliver is that **no text center ever lands inside it**: text steps over a
+/// gutter, but a narrow real column still holds its own values. So fuse a
+/// column only when it holds no span center *and* is far narrower than the
+/// columns that do hold text. Span centers are read straight off the raw spans,
+/// before `split_span_at_anchors` runs, so shredded fragments can't disguise a
+/// sliver as occupied.
+///
+/// The width guard matters independently: a worksheet's blank answer column is
+/// also centerless, but it is as wide as its neighbours and must survive.
+fn collapse_gutter_columns(xs: &mut Vec<f32>, lines: &[ProjectedLine], dbg: bool) {
+    /// A sliver must be at most this fraction of the median *content-bearing*
+    /// column width. Blank-but-full-width cells (worksheets, forms) sit well
+    /// above it and are preserved.
+    const GUTTER_MAX_WIDTH_FRAC: f32 = 0.5;
+
+    if xs.len() < 4 {
+        return; // fewer than 3 columns: nothing to fuse without destroying the table
+    }
+    let centers: Vec<f32> = lines
+        .iter()
+        .flat_map(|l| l.spans.iter())
+        .filter(|s| !s.text.trim().is_empty())
+        .map(|s| s.x + s.width * 0.5)
+        .collect();
+    let has_center = |lo: f32, hi: f32| centers.iter().any(|&c| c >= lo && c < hi);
+
+    let before = xs.len();
+    while xs.len() > 3 {
+        // Median width of the columns that actually hold text.
+        let mut occupied: Vec<f32> = xs
+            .windows(2)
+            .filter(|w| has_center(w[0], w[1]))
+            .map(|w| w[1] - w[0])
+            .collect();
+        if occupied.is_empty() {
+            break;
+        }
+        occupied.sort_by(|a, b| a.total_cmp(b));
+        let median = occupied[occupied.len() / 2];
+        let max_sliver = median * GUTTER_MAX_WIDTH_FRAC;
+
+        // Narrowest centerless column, if any is slim enough to be a gutter.
+        let victim = xs
+            .windows(2)
+            .enumerate()
+            .filter(|(_, w)| !has_center(w[0], w[1]))
+            .map(|(i, w)| (i, w[1] - w[0]))
+            .filter(|&(_, width)| width < max_sliver)
+            .min_by(|a, b| a.1.total_cmp(&b.1));
+        let Some((i, _)) = victim else { break };
+        xs[i] = (xs[i] + xs[i + 1]) * 0.5;
+        xs.remove(i + 1);
+    }
+    if dbg && xs.len() != before {
+        eprintln!(
+            "[ruled]   gutter-collapse {before} -> {} boundaries",
+            xs.len()
+        );
+    }
+}
+
 fn build_ruled_table(
     hs: &[HSeg],
     vs: &[VSeg],
@@ -3263,6 +3365,7 @@ fn build_ruled_table(
     // rects contribute paired edges 4-6pt apart that would otherwise become
     // phantom 5pt "columns" the span splitter then shreds text into.
     cluster_boundaries(&mut xs, TABLE_COL_BOUNDARY_CLUSTER_PT);
+    collapse_gutter_columns(&mut xs, lines, dbg);
 
     // Distinct row y-coords (cluster again — multiple H lines may share a y).
     // In the global pass, first drop horizontal rules that span only a small
@@ -3720,6 +3823,60 @@ pub(super) fn escape_table_cell(s: &str) -> String {
 mod tests {
     use super::super::test_helpers::{line, line_with_spans, rect_borders, stroke};
     use super::*;
+
+    #[test]
+    fn gutter_columns_fused_but_narrow_real_column_kept() {
+        // Padded cell borders: real columns 40..140, 160..260, 280..380 with
+        // 20pt gutters between them. Text sits inside the real columns only.
+        let rows = [
+            line_with_spans(
+                &[("alpha", 45.0), ("beta", 165.0), ("gamma", 285.0)],
+                100.0,
+                10.0,
+            ),
+            line_with_spans(
+                &[("delta", 45.0), ("eps", 165.0), ("zeta", 285.0)],
+                120.0,
+                10.0,
+            ),
+        ];
+        let mut xs = vec![40.0, 140.0, 160.0, 260.0, 280.0, 380.0];
+        collapse_gutter_columns(&mut xs, &rows, false);
+        assert_eq!(xs.len(), 4, "two 20pt gutters should fuse: {xs:?}");
+
+        // A genuinely narrow but *occupied* column must survive, even though it
+        // is the same width as the gutters above.
+        let rows = [
+            line_with_spans(
+                &[("1", 45.0), ("desc", 65.0), ("more text", 205.0)],
+                100.0,
+                10.0,
+            ),
+            line_with_spans(
+                &[("2", 45.0), ("desc two", 65.0), ("text here", 205.0)],
+                120.0,
+                10.0,
+            ),
+        ];
+        let mut xs = vec![40.0, 60.0, 200.0, 380.0];
+        let before = xs.clone();
+        collapse_gutter_columns(&mut xs, &rows, false);
+        assert_eq!(xs, before, "occupied narrow column must not fuse");
+    }
+
+    #[test]
+    fn blank_worksheet_column_survives_gutter_collapse() {
+        // A worksheet's empty answer column is centerless like a gutter but is
+        // full width, so the width guard must keep it.
+        let rows = [
+            line_with_spans(&[("K+", 45.0)], 100.0, 10.0),
+            line_with_spans(&[("Na+", 45.0)], 120.0, 10.0),
+        ];
+        let mut xs = vec![40.0, 240.0, 440.0, 640.0];
+        let before = xs.clone();
+        collapse_gutter_columns(&mut xs, &rows, false);
+        assert_eq!(xs, before, "wide blank columns must not fuse: {xs:?}");
+    }
 
     #[test]
     fn split_cells_splits_on_wide_gaps() {
