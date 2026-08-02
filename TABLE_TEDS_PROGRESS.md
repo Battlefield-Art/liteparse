@@ -5,22 +5,22 @@ Goal: close the table-fidelity (TEDS) gap against **pdf-inspector** (firecrawl) 
 
 ## Standing
 
-| metric | baseline (2.10.1) | round 1 (`093ddba`) | round 2 (`520413d`) | round 3 | Δ total | pdf-inspector |
-|---|---|---|---|---|---|---|
-| **overall** | 0.8732 | 0.8757 | 0.8783 | **0.8786** | +0.0054 | 0.8753 |
-| TEDS | 0.6929 | 0.7128 | 0.7441 | **0.7471** | **+0.0542** | 0.8141 |
-| MHS | 0.8114 | 0.8175 | 0.8179 | **0.8179** | +0.0065 | 0.7879 |
-| NID | 0.9127 | 0.9129 | 0.9136 | **0.9136** | +0.0009 | 0.9147 |
+| metric | baseline (2.10.1) | r1 (`093ddba`) | r2 (`520413d`) | r3 (`08225ac`) | r4 | Δ total | pdf-inspector |
+|---|---|---|---|---|---|---|---|
+| **overall** | 0.8732 | 0.8757 | 0.8783 | 0.8786 | **0.8816** | +0.0084 | 0.8753 |
+| TEDS | 0.6929 | 0.7128 | 0.7441 | 0.7471 | **0.7817** | **+0.0888** | 0.8141 |
+| MHS | 0.8114 | 0.8175 | 0.8179 | 0.8179 | **0.8203** | +0.0089 | 0.7879 |
+| NID | 0.9127 | 0.9129 | 0.9136 | 0.9136 | **0.9143** | +0.0016 | 0.9147 |
 
-ParseBench table composite (the mandatory cross-check): 0.4034 → **0.4063** in
-round 3, so this round is positive on *both* benchmarks.
+ParseBench table composite (the mandatory cross-check): 0.4034 → 0.4063 (r3) →
+**0.4074** (r4), so every round so far is positive-or-flat on *both* benchmarks.
 
-We lead on overall + MHS, trail on TEDS by **0.067** (was 0.101) and NID by 0.001.
-**TEDS is scored on only 42 of the 200 docs**, so one doc = 0.024 of the mean.
+We lead on overall + MHS, trail on TEDS by **0.032** (was 0.101) and NID by
+0.0004. **TEDS is scored on only 42 of the 200 docs**, so one doc = 0.024 of the
+mean.
 
-Round 1 shipped as `093ddba`, round 2 as `520413d`; round 3 is ~120 lines in
-`crates/liteparse/src/markdown_layout/tables.rs` plus one line in `parser.rs`.
-303 lib tests pass.
+Round 4 is three commits (`87d54ef`, `46e95b4`, `8aad56b`), ~300 lines in
+`tables.rs` plus one line in `classify.rs`. 308 lib tests pass.
 
 ## What shipped
 
@@ -104,6 +104,77 @@ Round 1 shipped as `093ddba`, round 2 as `520413d`; round 3 is ~120 lines in
    Requires ≥3 words, since two words give one gap with nothing to compare it
    to. Unit tests cover both the firing case and the justified-prose case.
 
+## What shipped — round 4 (rowspans, the veto share, booktabs bands)
+
+6. **Rowspan-aware density gate** (`87d54ef`; +0.0055 odl TEDS, +0.0011
+   ParseBench; doc 146 0.358 → 0.588, nothing down).
+
+   The ruled-grid density gate counted a rowspan continuation cell as a *failed
+   text assignment*, so a table with a merged label column ("1. Embodying
+   sustainability values" beside three competence rows) died as mostly-empty and
+   its text spilled into prose. This is the general form of the "empty-frac is a
+   symptom, not a threshold" note below — the empties were real, they just had a
+   geometric explanation.
+
+   `rowspan_mask` reads the merge straight off the rules: a cell whose top
+   boundary carries **no horizontal stroke over its own centre**, at a boundary
+   **some vertical rule runs through**, is merged with the cell above. The mask
+   rides on `CellGrid` so it survives `collapse_phantom_rows`/`_cols` (and is
+   realigned across `merge_stacked_header`) — an early scalar version forgave
+   *pre*-collapse spanned cells against a *post*-collapse empty count and let a
+   junk grid through on the scale mismatch alone.
+
+   Both guards are load-bearing, each found by a document it broke:
+   - **vertical must continue through the boundary** — otherwise the grid has
+     merely *ended* there, and a page-frame component shredded body prose into a
+     2-column table.
+   - **the merged head must hold text** (walk up the run of spanned cells; the
+     first unspanned cell must be filled) — otherwise a chart's vertical
+     gridlines made every cell "spanned" and produced a 27-column table,
+     −0.0072 NID over 4 docs.
+
+   Test the column *centre*, never containment of the whole column: `xs` comes
+   from clustered + gutter-collapsed boundaries and the outer ones can sit tens
+   of points off the drawn border (doc 146: `xs[0]=42.9` vs a border at 79.7).
+
+7. **`already_handled` needs a material share** (`46e95b4`; +0.0053 odl TEDS,
+   ParseBench flat; doc 200 0.054 → 0.276, NID +0.097, MHS −0.143).
+
+   The global ruled pass builds doc 200's table whole, then `classify.rs` throws
+   it away because *some* xy_cut leaf tables on its own. That leaf was the
+   landscape slide's title band — **3 of the run's 58 lines**, "tabling" as a row
+   of gutter-split title fragments. Require the vetoing leaf to hold ≥¼ of the
+   run's lines. This is the mechanism behind the two dead `flatten_header_band`
+   guards recorded below: that component was rejected here, downstream of the
+   flatten, which is why both guards measured exactly zero.
+
+8. **Booktabs rule-band 2-column pass** (`8aad56b`; +0.0238 odl TEDS,
+   ParseBench flat; doc 165 0.000 → **1.000**, matching pdf-inspector, NID
+   +0.046, *one* doc changed).
+
+   Item 4's "bordered worksheet" diagnosis was wrong. Doc 165's table is two
+   hairlines with **no vertical rules anywhere on the page**, so `extract_h_v_segments`
+   yields 0 VSegs (they're gated on `height > 1.0`) and `find_grid_components`
+   never forms a component — `build_ruled_table` is never called, and no density
+   gate is ever reached. The real killer is `TABLE_MIN_COLUMNS = 3` on a
+   genuinely 2-column table. Round 3's splitter already recovers both tracks
+   (`ratio=3.42`, xs=[60,118]) from the merged header run; they were discarded
+   one line later.
+
+   `rule_bands` pairs two horizontal rules with ≥60% x-overlap, 10pt < gap <
+   ½ page, and **no vertical crossing between them** — a band with verticals is
+   a real grid and the ruled detector owns it. Inside a band, in gaps the normal
+   pass left empty, retry with `allow_two_col`: column minimum 2, and
+   single-piece body rows allowed (a blank second column makes *every* body row
+   one piece — `cells_from_raw_items_with_tracks` rejects those by default, and
+   that guard must stay default-off).
+
+   Detection runs **against the band's lines alone** (sub-slice, indices shifted
+   back), so a run can't reach past the rules that justify the relaxation. Doing
+   it in-place instead failed on `row spacing cv 0.53` because the run swallowed
+   the paragraph below the band. Further gates: band lines contiguous, ≥3 of
+   them, seed line reads as exactly 2 pieces.
+
 ## Cross-benchmark check is mandatory for table work
 
 **opendataloader-bench alone is not enough.** Round 2 looked perfect on it — four
@@ -160,12 +231,23 @@ that report in place**, so copy it aside before running a variant.
 - **Never rebuild the binary while a bench run is in flight** — both harnesses
   shell out to `target/release/lit`, so a mid-run `cargo build` silently mixes
   two variants into one score.
+- **Attribution runs are cheap and mandatory.** Two changes bundled into one
+  ParseBench run cost a day of ambiguity in round 4; one run per variant
+  (~12 min) is always worth it. `ab.sh` on odl is 1-2 min, so bundle there and
+  split on ParseBench.
 - **pdf-inspector repro**: `git clone --depth 1 https://github.com/firecrawl/pdf-inspector`,
   `cargo build --release --bin pdf2md` (~28s), run `pdf2md <pdf> --raw`. Its outputs and
   scores are already committed at `opendataloader-bench/prediction/pdf-inspector/`.
   Re-evaluate with `uv run src/evaluator.py --engine pdf-inspector`.
 
-## Where the remaining 0.101 sits
+## Where the remaining 0.032 sits
+
+Top per-doc gaps after round 4 (`perdoc.py`-style, ours vs pdf-inspector):
+200 −0.515, 83 −0.327, 119 −0.276, 197 −0.211, 182 −0.206, 121 −0.173,
+81 −0.162, 46 −0.156, 84 −0.154, 190 −0.127, 146 −0.126, 170 −0.122.
+Docs 81/83/84 are the same source family (item 8 in the old ranking, below).
+
+## Where the 0.101 sat before round 4
 
 Measured by GT-cell-text retention (liteparse **0.747** vs pdf-inspector **0.870**):
 
@@ -188,16 +270,23 @@ So the dominant problem is **misfiling**, not dropping, text.
    column *is* populated. Worth trying next, but the empty-first-cell rule is what makes
    the current version regression-free — relax it only behind an A/B.
 
-3. **Doc 200 (−0.737 alone, ~+0.018).** Columns are now correct after the gutter fix,
-   but the body rows come out empty. Cause: `flatten_header_band` absorbs the landscape
-   slide's full-width title rows into the colspan header, so rows 0..3 become a junk
-   header band. Note the obvious guard (skip rows whose `cells_repl` is uniform across
-   all columns) **does not fire** — PDFium splits the title into several spans.
+3. **Doc 200 is still the biggest single item (0.276 vs 0.791, ~+0.012).** The
+   table now reaches the output (item 7), so `flatten_header_band` is finally on a
+   live path. Two problems remain, and the *first* is the real one:
+   - **Column over-segmentation**: `xs` has 6 columns where GT has 4.
+     `336.9/358.5` is a padding-pair sliver that `collapse_gutter_columns` keeps
+     only because a *title* span centre lands in it, and `347.7` is a spurious
+     split inside the `Explanation` column. This also causes the second problem,
+     by pushing the real header row below `TABLE_ROW_MIN_FILL`.
+   - The flatten's anchor then lands on the first *data* row and eats it along
+     with the two title rows above. Relaxing the anchor to accept a half-filled
+     row of short, column-distinct labels wins +0.009 TEDS here and **costs
+     −0.0043 on ParseBench** — measured, not guessed. Do not ship it without
+     fixing the columns first.
 
-4. **Doc 165 worksheet (~+0.024).** Bordered worksheet whose second column is entirely
-   blank; the ruled grid is rejected (`rows-after-collapse 1`, `no-lines-consumed`).
-   Related: `TABLE_MAX_EMPTY_CELL_FRACTION` cannot be relaxed (see below), so this needs
-   a different route — likely the tagged struct tree (item 5).
+4. ~~**Doc 165 worksheet**~~ — **DONE in round 4** (item 8), 0.000 → 1.000. The
+   "bordered worksheet / `TABLE_MAX_EMPTY_CELL_FRACTION`" diagnosis in this slot
+   was wrong; see item 8 for what it actually was.
 
 5. ~~**Tagged `/Table` structure tree**~~ — **DEAD. Do not build this.** Measured
    before writing any code: **0 of the 200 opendataloader-bench PDFs carry a
@@ -210,10 +299,15 @@ So the dominant problem is **misfiling**, not dropping, text.
    nodes under `pages[].structure_tree.roots`. Still worth having for *real
    user* documents someday, but it can never show up in these numbers.
 
-6. **Sub-word tracks are still on the table.** Round 3 uses word boxes only to
-   split runs into pieces. `split_text_at_x_anchors` still locates a split by
-   *linear interpolation over character index*, which is why doc 83 emits
-   `10 .1%`. Feeding real word x's into that function is the obvious next step.
+6. ~~**Sub-word tracks**~~ — **built and measured inert.** `split_words_at_x_anchors`
+   (real word x's) and `bucket_words_into_columns` (per-word ruled-column
+   assignment) now front both anchor-split paths, and the 200-doc output is
+   **byte-identical**. The borderless multi-track branch fires only **12 times in
+   the whole corpus** and word/char agree every time; the ruled branch fires 434
+   times and buckets 219 of them differently, but every one of those components
+   is rejected later anyway. Round 3's gutter split already consumes this class
+   upstream. Kept (geometry beats interpolation where it does fire), but don't
+   expect a number from it — doc 83's `10 .1%` comes from somewhere else.
 
 7. **Doc 190's last row (`Merge v4 | SLERP`, −0.126).** The header row is fixed;
    the final body row still falls out because its second cell (`SLERP`, x=182.9)
@@ -258,6 +352,12 @@ So the dominant problem is **misfiling**, not dropping, text.
   (`Number | of clauses` split across two columns) over a correct borderless
   table. Fixing this class needs either detector-priority plumbing or splitting
   the *component* — not a post-hoc row trim. Reverted; not in the shipped diff.
+- **Relaxing the `flatten_header_band` anchor** to accept a half-filled row of
+  short (≤40 char), column-distinct labels when column over-segmentation pushes
+  the real header below `TABLE_ROW_MIN_FILL`. Doc 200 +0.009 TEDS / +0.020 NID
+  with no odl collateral — and **−0.0043 on ParseBench**, attributed by a
+  one-variable run. Reverted. This is the second time odl-bench alone would have
+  shipped a table regression.
 - **A second full-width-spanner guard in `flatten_header_band`** (reject the flatten
   when a produced header cell exceeds 100 chars, aimed at doc 200): **exactly zero
   delta** — this is the second guard to die here. The `[ruled] colspan header flatten`
