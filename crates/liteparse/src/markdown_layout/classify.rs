@@ -19,7 +19,7 @@ use super::paragraphs::{
     continues_paragraph, ends_hyphenated, ends_sentence_final, is_soft_hyphen_break,
 };
 use super::repetition::is_header_or_footer;
-use super::tables::{detect_ruled_tables, detect_tables, merge_table_runs};
+use super::tables::{detect_ruled_tables, detect_tables_banded, merge_table_runs};
 
 /// A document-order page interruption that breaks the normal text flow: either
 /// a horizontal rule (from vector graphics) or a figure injection (a raster
@@ -504,7 +504,7 @@ fn classify_region(
     // sub-list's line bboxes anyway.
     let ruled_runs = detect_ruled_tables(lines, &page.graphics, page.page_width, page.page_height);
     let borderless_runs = precomputed_tables
-        .unwrap_or_else(|| detect_tables(lines));
+        .unwrap_or_else(|| detect_tables_banded(lines, &page.graphics, page.page_height));
     let table_runs = merge_table_runs(ruled_runs, borderless_runs);
 
     // Region-wide pre-pass: which line indices carry a lettered/roman marker

@@ -31,6 +31,14 @@ const TABLE_MIN_TRACK_GAP_FLOOR_PT: f32 = 12.0;
 /// anchor the header/body split in ruled-grid collapse.
 const TABLE_ROW_MIN_FILL: f32 = 0.9;
 
+/// Two horizontal rules closer than this bound a heading underline or a boxed
+/// caption, not a table body.
+const RULE_BAND_MIN_HEIGHT_PT: f32 = 10.0;
+
+/// A rule band with fewer lines than this is a rule under a heading or a run of
+/// hyperlink underlines — never a table.
+const RULE_BAND_MIN_LINES: usize = 3;
+
 /// Floor for the sparse-new-row path: a partial-cell line whose bottom-gap
 /// exceeds this fraction qualifies as a real new row (with empty cells at
 /// missing tracks) instead of being treated as a wrap continuation. Below
@@ -593,13 +601,22 @@ fn cells_from_raw_items_with_tracks(
     line: &ProjectedLine,
     tracks: &[f32],
 ) -> Option<Vec<TableCell>> {
+    cells_from_raw_items_with_tracks_opt(line, tracks, false)
+}
+
+/// `allow_single_piece` admits a row holding one piece. Off by default: a
+/// single piece spanning multiple tracks is almost always prose (a wrapped
+/// paragraph whose x-range merely overlaps the track region), and shredding it
+/// at whitespace anchors corrupts the body text. It is only safe where the row
+/// is known to be inside a table already — a rule band whose second column is
+/// blank, where every body row legitimately has one piece.
+fn cells_from_raw_items_with_tracks_opt(
+    line: &ProjectedLine,
+    tracks: &[f32],
+    allow_single_piece: bool,
+) -> Option<Vec<TableCell>> {
     let spans = line_pieces(line);
-    // Require ≥ 2 column pieces on the row. A single-piece row spanning
-    // multiple tracks is almost always prose (wrapped paragraph whose x-range
-    // happens to overlap the track region); shredding it at whitespace
-    // anchors corrupts the body text. Real merged-numeric table rows still
-    // have a label piece and a values piece (≥ 2).
-    if spans.len() < 2 {
+    if spans.len() < 2 && !(allow_single_piece && spans.len() == 1) {
         return None;
     }
     let tol = TABLE_TRACK_TOLERANCE_PT;
@@ -907,7 +924,9 @@ fn try_detect_table_inferred(
     start_idx: usize,
     floor: usize,
     allow_two_row: bool,
+    allow_two_col: bool,
 ) -> Option<TableRun> {
+    let min_columns = if allow_two_col { 2 } else { TABLE_MIN_COLUMNS };
     let dbgt = *super::flags::DEBUG_TABLE;
     let seed_txt: String = lines[start_idx]
         .spans
@@ -939,7 +958,7 @@ fn try_detect_table_inferred(
                 .join(",")
         );
     }
-    if tracks.len() < TABLE_MIN_COLUMNS {
+    if tracks.len() < min_columns {
         bail!("tracks {} < MIN_COLUMNS", tracks.len());
     }
     // Only bother if we'd actually unlock more columns than the default path.
@@ -1024,10 +1043,11 @@ fn try_detect_table_inferred(
     let Some(body_start) = body_start else {
         bail!("no strong body row in window");
     };
-    let Some(first) = cells_from_raw_items_with_tracks(&lines[body_start], &tracks) else {
+    let Some(first) = cells_from_raw_items_with_tracks_opt(&lines[body_start], &tracks, allow_two_col)
+    else {
         bail!("body row cells unassignable");
     };
-    if first.iter().filter(|c| !c.text.is_empty()).count() < TABLE_MIN_COLUMNS {
+    if first.iter().filter(|c| !c.text.is_empty()).count() < min_columns {
         bail!("body populated cells < MIN_COLUMNS");
     }
     let mut rows: Vec<(usize, &ProjectedLine, Vec<TableCell>)> =
@@ -1042,7 +1062,8 @@ fn try_detect_table_inferred(
         if !table_rows_adjacent(rows.last().unwrap().1, &lines[j]) {
             break;
         }
-        let Some(cells) = cells_from_raw_items_with_tracks(&lines[j], &tracks) else {
+        let Some(cells) = cells_from_raw_items_with_tracks_opt(&lines[j], &tracks, allow_two_col)
+        else {
             if dbgt {
                 let rt: String = lines[j]
                     .spans
@@ -1452,6 +1473,114 @@ pub(super) fn detect_tables(lines: &[ProjectedLine]) -> Vec<TableRun> {
     detect_tables_impl(lines, true)
 }
 
+/// `detect_tables` plus the booktabs rule-band pass: a table drawn as nothing
+/// but a top and bottom hairline has no grid for the ruled detector and, when
+/// it has only two columns, is below `TABLE_MIN_COLUMNS` for the borderless
+/// one. The rules themselves are the missing evidence — see `rule_bands`.
+pub(super) fn detect_tables_banded(
+    lines: &[ProjectedLine],
+    graphics: &[GraphicPrimitive],
+    page_height: f32,
+) -> Vec<TableRun> {
+    let runs = detect_tables_impl(lines, true);
+    let bands = rule_bands(graphics, page_height);
+    if bands.is_empty() {
+        return runs;
+    }
+    two_col_band_pass(lines, runs, &bands)
+}
+
+/// A booktabs rule band: a pair of horizontal rules with nothing ruled between
+/// them, i.e. the top and bottom of a table drawn without a grid.
+///
+/// Requires the two rules to overlap in x (they bound the same block), to sit
+/// far enough apart to hold rows but not so far as to be page furniture, and —
+/// crucially — to have **no vertical rule crossing between them**. A band with
+/// verticals is a real grid, and the ruled detector owns it.
+fn rule_bands(graphics: &[GraphicPrimitive], page_height: f32) -> Vec<(f32, f32)> {
+    let (hs, vs) = extract_h_v_segments(graphics);
+    let hs = cluster_h_segments(hs);
+    let mut out = Vec::new();
+    for pair in hs.windows(2) {
+        let (top, bot) = (&pair[0], &pair[1]);
+        let sep = bot.y - top.y;
+        if !(RULE_BAND_MIN_HEIGHT_PT..page_height * 0.5).contains(&sep) {
+            continue;
+        }
+        let overlap = (top.x_max.min(bot.x_max) - top.x_min.max(bot.x_min)).max(0.0);
+        let extent = (top.x_max - top.x_min).max(bot.x_max - bot.x_min).max(1.0);
+        if overlap / extent < 0.6 {
+            continue;
+        }
+        if vs
+            .iter()
+            .any(|v| v.y_min < bot.y - 1.0 && v.y_max > top.y + 1.0)
+        {
+            continue;
+        }
+        out.push((top.y, bot.y));
+    }
+    out
+}
+
+/// Last-resort pass for two-column tables enclosed in a rule band.
+///
+/// Modelled on `two_row_second_pass` and gated the same way — only in the index
+/// gaps where the normal pass found nothing, and only for runs that stay inside
+/// the gap. The extra requirement is that the seed line lie inside a band and
+/// that the band hold enough lines to be a table rather than a rule under a
+/// heading or a hyperlink underline.
+fn two_col_band_pass(
+    lines: &[ProjectedLine],
+    runs: Vec<TableRun>,
+    bands: &[(f32, f32)],
+) -> Vec<TableRun> {
+    let claimed = |a: usize, b: usize| runs.iter().any(|r| r.start < b && a < r.end);
+    let mut extra: Vec<TableRun> = Vec::new();
+    for &(y0, y1) in bands {
+        let inside: Vec<usize> = (0..lines.len())
+            .filter(|&i| {
+                let c = lines[i].bbox.y + lines[i].bbox.height * 0.5;
+                c > y0 && c < y1
+            })
+            .collect();
+        // The band's lines must be a contiguous run of the region and numerous
+        // enough to be a table body rather than a rule under a heading or a
+        // stack of hyperlink underlines.
+        if inside.len() < RULE_BAND_MIN_LINES
+            || inside.last().unwrap() - inside[0] + 1 != inside.len()
+        {
+            continue;
+        }
+        let (bs, be) = (inside[0], inside.last().unwrap() + 1);
+        if claimed(bs, be) {
+            continue;
+        }
+        // The seed must read as a genuine two-cell row, not a wrapped prose
+        // line that happens to sit under a rule.
+        if line_pieces(&lines[bs]).len() != 2 {
+            continue;
+        }
+        // Detect against the band's lines alone: a run can then never reach
+        // past the rules that are the whole justification for relaxing
+        // `TABLE_MIN_COLUMNS` here.
+        let sub: Vec<ProjectedLine> = lines[bs..be].to_vec();
+        if let Some(mut run) = try_detect_table_inferred(&sub, 0, 0, false, true) {
+            run.start += bs;
+            run.end += bs;
+            run.body_start += bs;
+            extra.push(run);
+        }
+    }
+    if extra.is_empty() {
+        return runs;
+    }
+    let mut all = runs;
+    all.extend(extra);
+    all.sort_by_key(|r| r.start);
+    all
+}
+
 /// Count borderless table runs for the layout-complexity stats. Excludes
 /// description lists — a label/value pair block reads fine as text, so it
 /// should not flag the page as table-bearing. `GridFallback` runs count:
@@ -1502,7 +1631,7 @@ fn detect_tables_impl(lines: &[ProjectedLine], include_desc_lists: bool) -> Vec<
     let mut i = 0;
     let mut floor = 0;
     while i < lines.len() {
-        if let Some(run) = try_detect_table_inferred(lines, i, floor, false) {
+        if let Some(run) = try_detect_table_inferred(lines, i, floor, false, false) {
             floor = run.end;
             i = run.end;
             out.push(run);
@@ -1568,7 +1697,7 @@ fn two_row_second_pass(lines: &[ProjectedLine], runs: Vec<TableRun>) -> Vec<Tabl
         // back into the preceding table run.
         let mut floor = gs;
         while i < ge {
-            match try_detect_table_inferred(lines, i, floor, true) {
+            match try_detect_table_inferred(lines, i, floor, true, false) {
                 // A run that reaches past the gap is exactly the theft case the
                 // gap restriction exists to prevent.
                 Some(run) if run.end <= ge && run.start >= gs => {
@@ -4636,6 +4765,113 @@ mod tests {
         assert_eq!(cells[0].text, "A");
         assert_eq!(cells[1].text, "B");
         assert_eq!(cells[2].text, "C");
+    }
+
+    fn hairline(y: f32, x: f32, w: f32) -> GraphicPrimitive {
+        GraphicPrimitive::Rect {
+            bbox: Rect {
+                x,
+                y,
+                width: w,
+                height: 0.8,
+            },
+            stroke: Some("#000".to_string()),
+            fill: None,
+        }
+    }
+
+    #[test]
+    fn booktabs_rule_pair_is_a_band() {
+        // doc 165: the whole table is two hairlines 98pt apart, no verticals.
+        let g = vec![hairline(139.5, 56.7, 225.9), hairline(237.4, 56.7, 225.9)];
+        assert_eq!(rule_bands(&g, 792.0), [(139.5, 237.4)]);
+    }
+
+    #[test]
+    fn ruled_grid_is_not_a_band() {
+        // Same rules, but a vertical runs between them: this is a real grid and
+        // the ruled detector owns it. Relaxing TABLE_MIN_COLUMNS here would be
+        // a second, worse opinion about the same table.
+        let mut g = vec![hairline(139.5, 56.7, 225.9), hairline(237.4, 56.7, 225.9)];
+        g.push(GraphicPrimitive::Rect {
+            bbox: Rect {
+                x: 150.0,
+                y: 139.5,
+                width: 0.8,
+                height: 97.9,
+            },
+            stroke: Some("#000".to_string()),
+            fill: None,
+        });
+        assert!(rule_bands(&g, 792.0).is_empty());
+    }
+
+    #[test]
+    fn heading_underline_pair_is_not_a_band() {
+        // Two rules 6pt apart bound a heading underline, not a table body.
+        let g = vec![hairline(100.0, 56.7, 225.9), hairline(106.0, 56.7, 225.9)];
+        assert!(rule_bands(&g, 792.0).is_empty());
+    }
+
+    #[test]
+    fn rowspan_mask_marks_unruled_cell_boundaries() {
+        // Two columns; the boundary at y=20 is ruled only across column 1, so
+        // column 0's cell there is merged with the one above it.
+        let hs = vec![
+            HSeg {
+                x_min: 0.0,
+                x_max: 100.0,
+                y: 0.0,
+            },
+            HSeg {
+                x_min: 50.0,
+                x_max: 100.0,
+                y: 20.0,
+            },
+            HSeg {
+                x_min: 0.0,
+                x_max: 100.0,
+                y: 40.0,
+            },
+        ];
+        let vs = vec![VSeg {
+            y_min: 0.0,
+            y_max: 40.0,
+            x: 50.0,
+        }];
+        let mask = rowspan_mask(&hs, &[0, 1, 2], &vs, &[0], &[0.0, 50.0, 100.0], &[0.0, 20.0, 40.0]);
+        assert_eq!(mask, vec![vec![false, false], vec![true, false]]);
+    }
+
+    #[test]
+    fn rowspan_mask_ignores_boundary_where_grid_ends() {
+        // No vertical crosses y=20, so the grid simply stops there — nothing is
+        // merged, and forgiving these empties would let a page frame shred
+        // prose into columns.
+        let hs = vec![
+            HSeg {
+                x_min: 0.0,
+                x_max: 10.0,
+                y: 0.0,
+            },
+            HSeg {
+                x_min: 0.0,
+                x_max: 10.0,
+                y: 20.0,
+            },
+            HSeg {
+                x_min: 0.0,
+                x_max: 10.0,
+                y: 40.0,
+            },
+        ];
+        let vs = vec![VSeg {
+            y_min: 0.0,
+            y_max: 15.0,
+            x: 50.0,
+        }];
+        let mask = rowspan_mask(&hs, &[0, 1, 2], &vs, &[0], &[0.0, 50.0, 100.0], &[0.0, 20.0, 40.0]);
+        assert!(mask.iter().flatten().all(|m| !*m));
     }
 
     #[test]
