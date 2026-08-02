@@ -68,6 +68,15 @@ const SPAN_GUTTER_MIN_RATIO: f32 = 2.5;
 /// tightly-kerned small text can't manufacture columns out of a 1pt jitter.
 const SPAN_GUTTER_MIN_PT: f32 = 3.0;
 
+/// Floor on the *ordinary* side of the bimodality ratio, as a fraction of the
+/// run's font size. The ratio is meant to compare candidate gutters against
+/// typical word spacing, but the sorted-gap scan takes whatever gap sits below
+/// the jump - and one degenerate sub-point gap (kerning jitter, a run-on
+/// superscript) would make an ordinary 3pt word space clear the ratio and read
+/// as a gutter tier of its own. A word space in `f`pt type is never far below
+/// `0.2 × f`, so nothing smaller may serve as the comparison base.
+const SPAN_GUTTER_MIN_ORDINARY_EM: f32 = 0.2;
+
 /// One horizontal piece of a PDFium text run: the run split at its internal
 /// column gutters. Most runs yield a single piece.
 #[derive(Debug, Clone)]
@@ -153,6 +162,8 @@ pub(super) fn split_span_at_gutters(span: &TextItem) -> Vec<SpanPiece<'_>> {
     sorted.sort_by(f32::total_cmp);
     // Largest ratio jump between adjacent sorted gaps: the boundary between
     // "ordinary space" and "gutter", if there is one.
+    let font = span.font_size.unwrap_or(span.height).max(1.0);
+    let lo_floor = font * SPAN_GUTTER_MIN_ORDINARY_EM;
     let mut cut = None;
     let mut best_ratio = SPAN_GUTTER_MIN_RATIO;
     for i in 0..sorted.len() - 1 {
@@ -160,7 +171,7 @@ pub(super) fn split_span_at_gutters(span: &TextItem) -> Vec<SpanPiece<'_>> {
         if hi < SPAN_GUTTER_MIN_PT {
             continue;
         }
-        let ratio = hi / lo.max(0.1);
+        let ratio = hi / lo.max(lo_floor);
         if ratio >= best_ratio {
             best_ratio = ratio;
             cut = Some(hi);
@@ -226,6 +237,13 @@ pub(super) fn line_pieces(line: &ProjectedLine) -> Vec<SpanPiece<'_>> {
         .collect();
     pieces.sort_by(|a, b| a.x.total_cmp(&b.x));
     pieces
+}
+
+/// `line_pieces` for every line up front. The detection scan tries most lines
+/// as a seed and re-reads its neighbours' pieces for each try, so computing
+/// them per call would redo the same splits O(lines × window) times.
+fn compute_line_pieces(lines: &[ProjectedLine]) -> Vec<Vec<SpanPiece<'_>>> {
+    lines.iter().map(line_pieces).collect()
 }
 
 /// One cell within a tabular row: contributing spans aggregated to text and
@@ -523,26 +541,29 @@ const TABLE_TRACK_INFERENCE_MAX_ROWS: usize = 12;
 /// 13.9pt inter-item gaps). It also surfaces tracks witnessed by even a
 /// single row when other rows in the same table have PDFium-level merged
 /// spans that hide the full column geometry.
-fn infer_tracks_from_raw_items(lines: &[ProjectedLine], start_idx: usize) -> Vec<f32> {
+fn infer_tracks_from_raw_items(
+    lines: &[ProjectedLine],
+    pieces: &[Vec<SpanPiece<'_>>],
+    start_idx: usize,
+) -> Vec<f32> {
     let mut xs: Vec<f32> = Vec::new();
-    let push_row_xs = |xs: &mut Vec<f32>, line: &ProjectedLine| {
+    let push_row_xs = |xs: &mut Vec<f32>, idx: usize| {
         // Piece x's, not span x's: a row PDFium emitted as one merged run
         // still witnesses its columns through its internal gutters.
-        let row_xs: Vec<f32> = line_pieces(line).iter().map(|p| p.x).collect();
         // Skip 0- or 1-item rows — they don't carry column info and can
         // introduce noise from single-cell prose lines.
-        if row_xs.len() >= 2 {
-            xs.extend(row_xs);
+        if pieces[idx].len() >= 2 {
+            xs.extend(pieces[idx].iter().map(|p| p.x));
         }
     };
-    push_row_xs(&mut xs, &lines[start_idx]);
+    push_row_xs(&mut xs, start_idx);
     let mut j = start_idx + 1;
     let mut rows_used = 1;
     while j < lines.len() && rows_used < TABLE_TRACK_INFERENCE_MAX_ROWS {
         if !table_rows_adjacent(&lines[j - 1], &lines[j]) {
             break;
         }
-        push_row_xs(&mut xs, &lines[j]);
+        push_row_xs(&mut xs, j);
         j += 1;
         rows_used += 1;
     }
@@ -598,7 +619,7 @@ fn cells_from_raw_items_with_tracks(
     line: &ProjectedLine,
     tracks: &[f32],
 ) -> Option<Vec<TableCell>> {
-    cells_from_raw_items_with_tracks_opt(line, tracks, false)
+    cells_from_pieces(&line_pieces(line), tracks, false)
 }
 
 /// `allow_single_piece` admits a row holding one piece. Off by default: a
@@ -607,12 +628,11 @@ fn cells_from_raw_items_with_tracks(
 /// at whitespace anchors corrupts the body text. It is only safe where the row
 /// is known to be inside a table already - a rule band whose second column is
 /// blank, where every body row legitimately has one piece.
-fn cells_from_raw_items_with_tracks_opt(
-    line: &ProjectedLine,
+fn cells_from_pieces(
+    spans: &[SpanPiece<'_>],
     tracks: &[f32],
     allow_single_piece: bool,
 ) -> Option<Vec<TableCell>> {
-    let spans = line_pieces(line);
     if spans.len() < 2 && !(allow_single_piece && spans.len() == 1) {
         return None;
     }
@@ -636,7 +656,7 @@ fn cells_from_raw_items_with_tracks_opt(
         }
         dst.push_str(src);
     };
-    for span in &spans {
+    for span in spans {
         let x0 = span.x;
         let x1 = span.end_x;
         let covered: Vec<usize> = tracks
@@ -918,6 +938,7 @@ fn finalize_table_run(
 /// these gates globally is unsafe.
 fn try_detect_table_inferred(
     lines: &[ProjectedLine],
+    pieces: &[Vec<SpanPiece<'_>>],
     start_idx: usize,
     floor: usize,
     allow_two_row: bool,
@@ -941,7 +962,7 @@ fn try_detect_table_inferred(
     }
 
     let baseline_cells = split_cells(&lines[start_idx]);
-    let tracks = infer_tracks_from_raw_items(lines, start_idx);
+    let tracks = infer_tracks_from_raw_items(lines, pieces, start_idx);
     if dbgt {
         eprintln!(
             "[tbl-inferred try @{start_idx} \"{:.40}\"] tracks={} baseline={} xs=[{}]",
@@ -1006,8 +1027,8 @@ fn try_detect_table_inferred(
     // on the header, the run would break at the first unalignable header cell,
     // and the table would fall to the header-seeded path that drops a column.
     let tol = TABLE_TRACK_TOLERANCE_PT;
-    let is_strong_row = |line: &ProjectedLine| -> bool {
-        let spans = line_pieces(line);
+    let is_strong_row = |idx: usize| -> bool {
+        let spans = &pieces[idx];
         if spans.len() < tracks.len() {
             return false;
         }
@@ -1029,7 +1050,7 @@ fn try_detect_table_inferred(
             if k > start_idx && !table_rows_adjacent(&lines[k - 1], &lines[k]) {
                 break;
             }
-            if is_strong_row(&lines[k]) {
+            if is_strong_row(k) {
                 body_start = Some(k);
                 break;
             }
@@ -1040,9 +1061,7 @@ fn try_detect_table_inferred(
     let Some(body_start) = body_start else {
         bail!("no strong body row in window");
     };
-    let Some(first) =
-        cells_from_raw_items_with_tracks_opt(&lines[body_start], &tracks, allow_two_col)
-    else {
+    let Some(first) = cells_from_pieces(&pieces[body_start], &tracks, allow_two_col) else {
         bail!("body row cells unassignable");
     };
     if first.iter().filter(|c| !c.text.is_empty()).count() < min_columns {
@@ -1060,8 +1079,7 @@ fn try_detect_table_inferred(
         if !table_rows_adjacent(rows.last().unwrap().1, &lines[j]) {
             break;
         }
-        let Some(cells) = cells_from_raw_items_with_tracks_opt(&lines[j], &tracks, allow_two_col)
-        else {
+        let Some(cells) = cells_from_pieces(&pieces[j], &tracks, allow_two_col) else {
             if dbgt {
                 let rt: String = lines[j]
                     .spans
@@ -1476,15 +1494,16 @@ pub(super) fn detect_tables(lines: &[ProjectedLine]) -> Vec<TableRun> {
 /// one. The rules themselves are the missing evidence - see `rule_bands`.
 pub(super) fn detect_tables_banded(
     lines: &[ProjectedLine],
-    graphics: &[GraphicPrimitive],
+    segs: &RuleSegments,
     page_height: f32,
 ) -> Vec<TableRun> {
-    let runs = detect_tables_impl(lines, true);
-    let bands = rule_bands(graphics, page_height);
+    let pieces = compute_line_pieces(lines);
+    let runs = detect_tables_with_pieces(lines, &pieces, true);
+    let bands = rule_bands(segs, page_height);
     if bands.is_empty() {
         return runs;
     }
-    two_col_band_pass(lines, runs, &bands)
+    two_col_band_pass(lines, &pieces, runs, &bands)
 }
 
 /// A booktabs rule band: a pair of horizontal rules with nothing ruled between
@@ -1494,9 +1513,8 @@ pub(super) fn detect_tables_banded(
 /// far enough apart to hold rows but not so far as to be page furniture, and -
 /// crucially - to have **no vertical rule crossing between them**. A band with
 /// verticals is a real grid, and the ruled detector owns it.
-fn rule_bands(graphics: &[GraphicPrimitive], page_height: f32) -> Vec<(f32, f32)> {
-    let (hs, vs) = extract_h_v_segments(graphics);
-    let hs = cluster_h_segments(hs);
+fn rule_bands(segs: &RuleSegments, page_height: f32) -> Vec<(f32, f32)> {
+    let RuleSegments { hs, raw_vs: vs, .. } = segs;
     let mut out = Vec::new();
     for pair in hs.windows(2) {
         let (top, bot) = (&pair[0], &pair[1]);
@@ -1529,6 +1547,7 @@ fn rule_bands(graphics: &[GraphicPrimitive], page_height: f32) -> Vec<(f32, f32)
 /// heading or a hyperlink underline.
 fn two_col_band_pass(
     lines: &[ProjectedLine],
+    pieces: &[Vec<SpanPiece<'_>>],
     runs: Vec<TableRun>,
     bands: &[(f32, f32)],
 ) -> Vec<TableRun> {
@@ -1555,13 +1574,15 @@ fn two_col_band_pass(
         }
         // The seed must read as a genuine two-cell row, not a wrapped prose
         // line that happens to sit under a rule.
-        if line_pieces(&lines[bs]).len() != 2 {
+        if pieces[bs].len() != 2 {
             continue;
         }
         // Detect against the band's lines alone: a run can then never reach
         // past the rules that are the whole justification for relaxing
         // `TABLE_MIN_COLUMNS` here.
-        if let Some(mut run) = try_detect_table_inferred(&lines[bs..be], 0, 0, false, true) {
+        if let Some(mut run) =
+            try_detect_table_inferred(&lines[bs..be], &pieces[bs..be], 0, 0, false, true)
+        {
             run.start += bs;
             run.end += bs;
             run.body_start += bs;
@@ -1598,7 +1619,8 @@ pub(crate) fn validated_ruled_table_rects(
     page_width: f32,
     page_height: f32,
 ) -> Vec<Rect> {
-    detect_ruled_tables_global(lines, graphics, page_width, page_height)
+    let segs = extract_rule_segments(graphics);
+    detect_ruled_tables_global(lines, &segs, page_width, page_height)
         .into_iter()
         .filter_map(|(_, consumed)| {
             let mut x0 = f32::INFINITY;
@@ -1623,11 +1645,20 @@ pub(crate) fn validated_ruled_table_rects(
 }
 
 fn detect_tables_impl(lines: &[ProjectedLine], include_desc_lists: bool) -> Vec<TableRun> {
+    let pieces = compute_line_pieces(lines);
+    detect_tables_with_pieces(lines, &pieces, include_desc_lists)
+}
+
+fn detect_tables_with_pieces(
+    lines: &[ProjectedLine],
+    pieces: &[Vec<SpanPiece<'_>>],
+    include_desc_lists: bool,
+) -> Vec<TableRun> {
     let mut out = Vec::new();
     let mut i = 0;
     let mut floor = 0;
     while i < lines.len() {
-        if let Some(run) = try_detect_table_inferred(lines, i, floor, false, false) {
+        if let Some(run) = try_detect_table_inferred(lines, pieces, i, floor, false, false) {
             floor = run.end;
             i = run.end;
             out.push(run);
@@ -1656,7 +1687,7 @@ fn detect_tables_impl(lines: &[ProjectedLine], include_desc_lists: bool) -> Vec<
             break;
         }
     }
-    two_row_second_pass(lines, merged)
+    two_row_second_pass(lines, pieces, merged)
 }
 
 /// Last-resort pass for header + single-data-row tables.
@@ -1671,7 +1702,11 @@ fn detect_tables_impl(lines: &[ProjectedLine], include_desc_lists: bool) -> Vec<
 /// construction a run detected here cannot steal rows from a real table: there
 /// isn't one in the gap. Runs that would spill past the gap end are discarded
 /// for the same reason.
-fn two_row_second_pass(lines: &[ProjectedLine], runs: Vec<TableRun>) -> Vec<TableRun> {
+fn two_row_second_pass(
+    lines: &[ProjectedLine],
+    pieces: &[Vec<SpanPiece<'_>>],
+    runs: Vec<TableRun>,
+) -> Vec<TableRun> {
     // Gaps between (and around) the runs the normal pass claimed.
     let mut gaps: Vec<(usize, usize)> = Vec::new();
     let mut cursor = 0;
@@ -1692,7 +1727,7 @@ fn two_row_second_pass(lines: &[ProjectedLine], runs: Vec<TableRun>) -> Vec<Tabl
         // back into the preceding table run.
         let mut floor = gs;
         while i < ge {
-            match try_detect_table_inferred(lines, i, floor, true, false) {
+            match try_detect_table_inferred(lines, pieces, i, floor, true, false) {
                 // A run that reaches past the gap is exactly the theft case the
                 // gap restriction exists to prevent.
                 Some(run) if run.end <= ge && run.start >= gs => {
@@ -2968,6 +3003,27 @@ const RULED_HLINE_MIN_COVERAGE: f32 = 0.5;
 /// Kept well below the horizontal counterpart: a genuine divider that rules only
 /// the header band of an otherwise open table is a real layout, and must survive.
 const RULED_VLINE_MIN_COVERAGE: f32 = 0.2;
+
+/// H/V rule segments extracted once from a page's graphics and shared by every
+/// table-detection pass on the page. The global ruled pass, the per-region
+/// ruled pass, the leaf-veto re-check, and the rule-band pass all consume the
+/// same segments; extracting per call would redo the work once per region.
+pub(super) struct RuleSegments {
+    /// Horizontal segments, clustered by y.
+    hs: Vec<HSeg>,
+    /// Vertical segments as extracted, before same-x clustering. The component
+    /// splitter needs these: clustering unions y-ranges across gaps.
+    raw_vs: Vec<VSeg>,
+    /// Vertical segments, clustered by x.
+    vs: Vec<VSeg>,
+}
+
+pub(super) fn extract_rule_segments(graphics: &[GraphicPrimitive]) -> RuleSegments {
+    let (hs, raw_vs) = extract_h_v_segments(graphics);
+    let hs = cluster_h_segments(hs);
+    let vs = cluster_v_segments(raw_vs.clone());
+    RuleSegments { hs, raw_vs, vs }
+}
 
 /// Extract horizontal and vertical line segments from a page's graphics. Each
 /// `Stroke` becomes one HSeg or VSeg depending on orientation; each stroked
@@ -4597,23 +4653,21 @@ fn split_component_at_grid_gaps(
 /// in document order (sorted by `start`).
 fn detect_ruled_tables_impl(
     lines: &[ProjectedLine],
-    graphics: &[GraphicPrimitive],
+    segs: &RuleSegments,
     page_width: f32,
     page_height: f32,
     pass: RuledPass,
 ) -> Vec<(TableRun, Vec<usize>)> {
-    let (hs, raw_vs) = extract_h_v_segments(graphics);
-    let hs = cluster_h_segments(hs);
-    let vs = cluster_v_segments(raw_vs.clone());
+    let RuleSegments { hs, raw_vs, vs } = segs;
     if hs.len() < 2 || vs.len() < 2 {
         return Vec::new();
     }
-    let components = find_grid_components(&hs, &vs);
+    let components = find_grid_components(hs, vs);
     let mut out = Vec::new();
     for (h_idx, v_idx) in components {
-        for band in split_component_at_grid_gaps(&hs, &vs, &raw_vs, &h_idx, &v_idx) {
+        for band in split_component_at_grid_gaps(hs, vs, raw_vs, &h_idx, &v_idx) {
             if let Some(run) = build_ruled_table(
-                &hs,
+                hs,
                 &band.vs,
                 &band.h_idx,
                 &band.v_idx,
@@ -4634,20 +4688,14 @@ fn detect_ruled_tables_impl(
 /// global pass needs.
 pub(super) fn detect_ruled_tables(
     lines: &[ProjectedLine],
-    graphics: &[GraphicPrimitive],
+    segs: &RuleSegments,
     page_width: f32,
     page_height: f32,
 ) -> Vec<TableRun> {
-    detect_ruled_tables_impl(
-        lines,
-        graphics,
-        page_width,
-        page_height,
-        RuledPass::PerRegion,
-    )
-    .into_iter()
-    .map(|(r, _)| r)
-    .collect()
+    detect_ruled_tables_impl(lines, segs, page_width, page_height, RuledPass::PerRegion)
+        .into_iter()
+        .map(|(r, _)| r)
+        .collect()
 }
 
 /// Page-level ruled-table detection over *all* lines. A table whose rows
@@ -4657,11 +4705,11 @@ pub(super) fn detect_ruled_tables(
 /// consumed so the caller can pull them out of the region pipeline.
 pub(super) fn detect_ruled_tables_global(
     lines: &[ProjectedLine],
-    graphics: &[GraphicPrimitive],
+    segs: &RuleSegments,
     page_width: f32,
     page_height: f32,
 ) -> Vec<(TableRun, Vec<usize>)> {
-    detect_ruled_tables_impl(lines, graphics, page_width, page_height, RuledPass::Global)
+    detect_ruled_tables_impl(lines, segs, page_width, page_height, RuledPass::Global)
 }
 
 /// Count filled (non-empty) cells in a TableRun. GridFallback returns 0 so
@@ -4939,6 +4987,20 @@ mod tests {
     }
 
     #[test]
+    fn kerning_outlier_gap_does_not_fake_bimodality() {
+        // One degenerate 0.1pt gap beside ordinary ~3.4pt word spaces. The
+        // raw ratio between them is huge, but 3.4pt in 10pt type is a word
+        // space, not a gutter tier; the font-relative floor must reject it.
+        let span = run_with_words(&[
+            ("wide", 100.0, 20.0),
+            ("gap", 120.1, 15.0),
+            ("then", 138.5, 18.0),
+            ("normal", 159.9, 25.0),
+        ]);
+        assert_eq!(piece_texts(&span).len(), 1);
+    }
+
+    #[test]
     fn two_word_run_has_no_bimodality_to_measure() {
         // One gap is trivially the largest; there is nothing to compare it to.
         let span = run_with_words(&[("Added", 60.3, 24.1), ("Relative", 118.0, 31.1)]);
@@ -5101,7 +5163,10 @@ mod tests {
     fn booktabs_rule_pair_is_a_band() {
         // doc 165: the whole table is two hairlines 98pt apart, no verticals.
         let g = vec![hairline(139.5, 56.7, 225.9), hairline(237.4, 56.7, 225.9)];
-        assert_eq!(rule_bands(&g, 792.0), [(139.5, 237.4)]);
+        assert_eq!(
+            rule_bands(&extract_rule_segments(&g), 792.0),
+            [(139.5, 237.4)]
+        );
     }
 
     #[test]
@@ -5120,14 +5185,14 @@ mod tests {
             stroke: Some("#000".to_string()),
             fill: None,
         });
-        assert!(rule_bands(&g, 792.0).is_empty());
+        assert!(rule_bands(&extract_rule_segments(&g), 792.0).is_empty());
     }
 
     #[test]
     fn heading_underline_pair_is_not_a_band() {
         // Two rules 6pt apart bound a heading underline, not a table body.
         let g = vec![hairline(100.0, 56.7, 225.9), hairline(106.0, 56.7, 225.9)];
-        assert!(rule_bands(&g, 792.0).is_empty());
+        assert!(rule_bands(&extract_rule_segments(&g), 792.0).is_empty());
     }
 
     /// Four full-height dividers plus one short pair from a highlight box drawn
@@ -5502,7 +5567,7 @@ mod tests {
             line("d", 190.0, 155.0, 10.0, 10.0), // row 1, col 1
         ];
 
-        let runs = detect_ruled_tables(&lines, &graphics, 612.0, 792.0);
+        let runs = detect_ruled_tables(&lines, &extract_rule_segments(&graphics), 612.0, 792.0);
         assert_eq!(runs.len(), 1, "expected 1 ruled table, got {runs:?}");
         match &runs[0].block {
             Block::Table { header, rows } => {
@@ -5532,7 +5597,7 @@ mod tests {
             line("c", 90.0, 155.0, 10.0, 10.0),
             line("d", 190.0, 155.0, 10.0, 10.0),
         ];
-        let runs = detect_ruled_tables(&lines, &graphics, 612.0, 792.0);
+        let runs = detect_ruled_tables(&lines, &extract_rule_segments(&graphics), 612.0, 792.0);
         assert_eq!(runs.len(), 1);
     }
 
@@ -5542,7 +5607,7 @@ mod tests {
         // table even though it has H+V lines on all four sides.
         let graphics = rect_borders(10.0, 10.0, 590.0, 770.0);
         let lines = vec![line("body text", 50.0, 400.0, 10.0, 10.0)];
-        let runs = detect_ruled_tables(&lines, &graphics, 612.0, 792.0);
+        let runs = detect_ruled_tables(&lines, &extract_rule_segments(&graphics), 612.0, 792.0);
         assert!(
             runs.is_empty(),
             "page-border rect should not become a table, got {runs:?}"
@@ -5560,7 +5625,7 @@ mod tests {
             graphics.push(stroke(x, 100.0, x, 190.0, 0.5));
         }
         let lines = vec![line("only", 90.0, 115.0, 10.0, 10.0)];
-        let runs = detect_ruled_tables(&lines, &graphics, 612.0, 792.0);
+        let runs = detect_ruled_tables(&lines, &extract_rule_segments(&graphics), 612.0, 792.0);
         assert!(runs.is_empty());
     }
 
@@ -5584,7 +5649,7 @@ mod tests {
             line("alice", 90.0, 155.0, 10.0, 10.0),
             line("99", 190.0, 155.0, 10.0, 10.0),
         ];
-        let runs = detect_ruled_tables(&lines, &graphics, 612.0, 792.0);
+        let runs = detect_ruled_tables(&lines, &extract_rule_segments(&graphics), 612.0, 792.0);
         assert_eq!(runs.len(), 1);
         match &runs[0].block {
             Block::Table { header, rows } => {
