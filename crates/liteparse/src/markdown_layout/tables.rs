@@ -650,6 +650,12 @@ fn finalize_table_run(
     if header.is_none() && body_rows.len() < TABLE_MIN_ROWS {
         return None;
     }
+    // A header with no body is not a table. Reachable only via the bold-first-row
+    // promotion, which consumes rows[0] — harmless before the two-row relaxation,
+    // but with it rows[0] can be the *only* row.
+    if body_rows.is_empty() {
+        return None;
+    }
 
     if *super::flags::DEBUG_TABLE {
         eprintln!(
@@ -668,10 +674,16 @@ fn finalize_table_run(
     })
 }
 
+/// `allow_two_row` relaxes the two body-length gates below so a header row plus
+/// a *single* data row can form a table. Only ever set by the last-resort second
+/// pass in `detect_tables_impl`, which runs exclusively in regions where the
+/// normal pass found no table at all — see the comment there for why relaxing
+/// these gates globally is unsafe.
 fn try_detect_table_inferred(
     lines: &[ProjectedLine],
     start_idx: usize,
     floor: usize,
+    allow_two_row: bool,
 ) -> Option<TableRun> {
     let dbgt = *super::flags::DEBUG_TABLE;
     let seed_txt: String = lines[start_idx]
@@ -831,7 +843,8 @@ fn try_detect_table_inferred(
         rows.push((j, &lines[j], cells));
         j += 1;
     }
-    if rows.len() < TABLE_MIN_ROWS {
+    let min_rows = if allow_two_row { 1 } else { TABLE_MIN_ROWS };
+    if rows.len() < min_rows {
         bail!("rows {} < MIN_ROWS", rows.len());
     }
     // When the body was seeded below `start_idx` (the lead line was a header
@@ -841,7 +854,7 @@ fn try_detect_table_inferred(
     // header-seeded path of the real table below it. Already-strong seeds
     // (body_start == start_idx) keep the
     // standard MIN_ROWS threshold and are unaffected.
-    if body_start > start_idx && rows.len() < 3 {
+    if body_start > start_idx && rows.len() < 3 && !allow_two_row {
         bail!("advanced body_start but only {} rows", rows.len());
     }
     let cv = row_spacing_cv(&rows);
@@ -852,7 +865,7 @@ fn try_detect_table_inferred(
     let end = j;
 
     let bold_eligible = rows[0].2.iter().all(|c| c.bold && !c.text.is_empty());
-    finalize_table_run(
+    let run = finalize_table_run(
         lines,
         body_start,
         floor,
@@ -861,7 +874,64 @@ fn try_detect_table_inferred(
         column_count,
         end,
         bold_eligible,
-    )
+    )?;
+    // Runs that exist *only* because the relaxation fired must clear the extra
+    // content gates. Runs that would have passed the normal floor anyway are
+    // untouched, so this can never reject something the normal pass accepted.
+    if allow_two_row && rows.len() < TABLE_MIN_ROWS && !two_row_run_plausible(lines, &run) {
+        bail!("two-row run failed plausibility gates");
+    }
+    Some(run)
+}
+
+/// Plausibility gates for a header + single-data-row run.
+///
+/// Two rows is the weakest possible structural signal, and there is one thing
+/// that reliably counterfeits it: **fully-justified prose**. Justification
+/// stretches inter-word spaces until they read as column gutters, so any two
+/// consecutive lines of a justified paragraph infer clean tracks and shred into
+/// `| when travelling | to | conflict | zones, | more |`. Measured cost of not
+/// gating this: −0.0030 NID across 14 documents.
+///
+/// Two signals separate the real thing from the counterfeit:
+///
+/// 1. **Isolation.** A real 2-row table is surrounded by whitespace. A prose
+///    pair is mid-paragraph, so its neighbours are table-adjacent lines.
+/// 2. **Header shape.** Header cells are labels — they start with a capital or
+///    a digit and don't trail mid-sentence punctuation. Prose "headers" are
+///    lowercase words, often ending in a comma.
+fn two_row_run_plausible(lines: &[ProjectedLine], run: &TableRun) -> bool {
+    let Block::Table {
+        header: Some(header),
+        ..
+    } = &run.block
+    else {
+        return false;
+    };
+
+    if run.start > 0 && table_rows_adjacent(&lines[run.start - 1], &lines[run.start]) {
+        return false;
+    }
+    if run.end < lines.len() && table_rows_adjacent(&lines[run.end - 1], &lines[run.end]) {
+        return false;
+    }
+
+    let mut non_empty = 0;
+    for cell in header {
+        let t = cell.trim();
+        if t.is_empty() {
+            continue;
+        }
+        non_empty += 1;
+        let first = t.chars().next().unwrap();
+        if !(first.is_uppercase() || first.is_ascii_digit()) {
+            return false;
+        }
+        if t.ends_with(',') || t.ends_with(';') {
+            return false;
+        }
+    }
+    non_empty >= TABLE_MIN_COLUMNS
 }
 
 /// Try to extend a candidate table starting at `start_idx`. On success returns
@@ -1213,7 +1283,7 @@ fn detect_tables_impl(lines: &[ProjectedLine], include_desc_lists: bool) -> Vec<
     let mut i = 0;
     let mut floor = 0;
     while i < lines.len() {
-        if let Some(run) = try_detect_table_inferred(lines, i, floor) {
+        if let Some(run) = try_detect_table_inferred(lines, i, floor, false) {
             floor = run.end;
             i = run.end;
             out.push(run);
@@ -1242,7 +1312,62 @@ fn detect_tables_impl(lines: &[ProjectedLine], include_desc_lists: bool) -> Vec<
             break;
         }
     }
-    merged
+    two_row_second_pass(lines, merged)
+}
+
+/// Last-resort pass for header + single-data-row tables.
+///
+/// Some real tables are a header row plus exactly one data row. Both length
+/// gates in `try_detect_table_inferred` reject them. Relaxing those gates
+/// *directly* is not safe: a 2-row run forms early, higher up the page, and
+/// consumes the header of the real multi-row table below it (doc 197 gains
+/// +0.789 that way but doc 147 loses −0.822, plus ~8 NID regressions).
+///
+/// So instead we keep the normal pass exactly as-is and only retry, with the
+/// relaxation on, inside the index gaps where it found *no* table at all. By
+/// construction a run detected here cannot steal rows from a real table: there
+/// isn't one in the gap. Runs that would spill past the gap end are discarded
+/// for the same reason.
+fn two_row_second_pass(lines: &[ProjectedLine], runs: Vec<TableRun>) -> Vec<TableRun> {
+    // Gaps between (and around) the runs the normal pass claimed.
+    let mut gaps: Vec<(usize, usize)> = Vec::new();
+    let mut cursor = 0;
+    for r in &runs {
+        if r.start > cursor {
+            gaps.push((cursor, r.start));
+        }
+        cursor = cursor.max(r.end);
+    }
+    if cursor < lines.len() {
+        gaps.push((cursor, lines.len()));
+    }
+
+    let mut extra: Vec<TableRun> = Vec::new();
+    for (gs, ge) in gaps {
+        let mut i = gs;
+        // `floor` starts at the gap start so header absorption can never walk
+        // back into the preceding table run.
+        let mut floor = gs;
+        while i < ge {
+            match try_detect_table_inferred(lines, i, floor, true) {
+                // A run that reaches past the gap is exactly the theft case the
+                // gap restriction exists to prevent.
+                Some(run) if run.end <= ge && run.start >= gs => {
+                    floor = run.end;
+                    i = run.end;
+                    extra.push(run);
+                }
+                _ => i += 1,
+            }
+        }
+    }
+    if extra.is_empty() {
+        return runs;
+    }
+    let mut all = runs;
+    all.extend(extra);
+    all.sort_by_key(|r| r.start);
+    all
 }
 
 // ── Description-list 2-column table detector ──────────────────────────────
@@ -3807,7 +3932,121 @@ pub(super) fn merge_table_runs(
         }
     }
     kept.sort_by_key(|r| r.start);
+    for run in &mut kept {
+        if let Block::Table { rows, .. } = &mut run.block {
+            merge_continuation_rows(rows);
+        }
+    }
     kept
+}
+
+/// Fold soft-wrapped cell continuations back into the row they belong to.
+///
+/// A table cell holding a sentence wraps across several projected lines, and
+/// every one of those lines becomes its own grid row:
+///
+/// ```text
+/// | Knowledge |  | ● To understand the meaning of reducing, reusing and recycling |
+/// |           |  | and how they connect ● To understand the importance of the 3 Rs |
+/// ```
+///
+/// We long treated this as unsolvable, and *as geometry* it is: the gap between
+/// a wrapped line and a genuine next row is the same gap. But it is tractable
+/// once the grid exists, from the text alone — which is what pdf-inspector does
+/// and where most of our remaining structure-only TEDS loss sits.
+///
+/// A row is a continuation of its predecessor when all of these hold:
+///
+/// - it has the same width and an **empty first cell** (the row label lives on
+///   the first line of the row and is never repeated);
+/// - its filled columns are a **subset** of the predecessor's filled columns —
+///   a continuation can only extend cells that already have text;
+/// - it carries **no value-like cell** — numbers don't soft-wrap, so a
+///   blank-label row holding one is a real data row (typically a `Total`);
+/// - at least one extended cell reads as a soft wrap rather than a fresh
+///   sentence after a completed one.
+fn merge_continuation_rows(rows: &mut Vec<Vec<String>>) {
+    if rows.len() < 2 {
+        return;
+    }
+    // The whole rule keys off "empty first cell", which only means "wrapped
+    // line" when the first column is a *label* column. Plenty of tables just
+    // have a sparse first column — a timetable whose `Notes` column is blank on
+    // every run, a size chart, a hierarchical header. There, every row looks
+    // like a continuation and the table collapses into a single row (measured:
+    // one 37-row timetable went 0.859 -> 0.006 GriTS). Requiring the first
+    // column to be populated in at least half the rows separates the two, and
+    // is what keeps this net-neutral on ParseBench's table corpus.
+    let first_col_filled = rows
+        .iter()
+        .filter(|r| r.first().is_some_and(|c| !c.trim().is_empty()))
+        .count();
+    if first_col_filled * 2 < rows.len() {
+        return;
+    }
+    let mut out: Vec<Vec<String>> = Vec::with_capacity(rows.len());
+    for row in rows.drain(..) {
+        if let Some(prev) = out.last_mut() {
+            if is_continuation_row(prev, &row) {
+                for (i, cell) in row.iter().enumerate() {
+                    let t = cell.trim();
+                    if t.is_empty() {
+                        continue;
+                    }
+                    // `prev[i]` is non-empty for every filled column of `row`;
+                    // that is the subset rule `is_continuation_row` enforces.
+                    prev[i].push(' ');
+                    prev[i].push_str(t);
+                }
+                continue;
+            }
+        }
+        out.push(row);
+    }
+    *rows = out;
+}
+
+fn is_continuation_row(prev: &[String], cur: &[String]) -> bool {
+    if cur.len() != prev.len() || cur.len() < 2 {
+        return false;
+    }
+    // The row label is never repeated on a wrapped line.
+    if !cur[0].trim().is_empty() || prev[0].trim().is_empty() {
+        return false;
+    }
+    let filled: Vec<usize> = (0..cur.len())
+        .filter(|&i| !cur[i].trim().is_empty())
+        .collect();
+    if filled.is_empty() {
+        return false;
+    }
+    // A continuation extends existing text; it cannot introduce a new column.
+    if filled.iter().any(|&i| prev[i].trim().is_empty()) {
+        return false;
+    }
+    // Numbers never soft-wrap. A blank-label row carrying any value-like cell is
+    // a real data row — most often a `Total` line, whose label column is blank
+    // precisely because it isn't the row's own label. Vetoing on *any* value
+    // (not all of them) is what separates it from a genuine wrap, since such
+    // rows pair a short summary word with the figures.
+    if filled.iter().any(|&i| is_value_like(cur[i].trim())) {
+        return false;
+    }
+    filled
+        .iter()
+        .any(|&i| cell_continues(prev[i].trim_end(), cur[i].trim_start()))
+}
+
+/// Whether `cur` reads as the tail of `prev` rather than a new statement. The
+/// only shape we reject is a fresh capitalised sentence following a cell that
+/// already closed with terminal punctuation — that is a sub-row, not a wrap.
+fn cell_continues(prev: &str, cur: &str) -> bool {
+    let starts_new_sentence = cur
+        .chars()
+        .find(|c| c.is_alphabetic())
+        .is_some_and(|c| c.is_uppercase());
+    let prev_closed = prev.ends_with(['.', '!', '?']);
+    !(starts_new_sentence && prev_closed)
 }
 
 /// Escape `|` and `\n` inside a markdown table cell so the pipe-table grammar
@@ -3823,6 +4062,74 @@ pub(super) fn escape_table_cell(s: &str) -> String {
 mod tests {
     use super::super::test_helpers::{line, line_with_spans, rect_borders, stroke};
     use super::*;
+
+    fn rows(v: &[&[&str]]) -> Vec<Vec<String>> {
+        v.iter()
+            .map(|r| r.iter().map(|s| s.to_string()).collect())
+            .collect()
+    }
+
+    #[test]
+    fn wrapped_cell_lines_fold_into_their_row() {
+        let mut r = rows(&[
+            &["Knowledge", "● To understand the meaning of reducing and recycling"],
+            &["", "and how they connect ● To be familiar with the 7 Rs"],
+            &["Skills", "● To implement waste management into daily"],
+            &["", "life ● To promote reducing before recycling"],
+        ]);
+        merge_continuation_rows(&mut r);
+        assert_eq!(r.len(), 2);
+        assert_eq!(
+            r[0][1],
+            "● To understand the meaning of reducing and recycling and how they connect ● To be familiar with the 7 Rs"
+        );
+        assert_eq!(r[1][0], "Skills");
+    }
+
+    #[test]
+    fn totals_row_with_blank_label_is_not_a_continuation() {
+        // Regression: doc 45/47. A `Total` line legitimately has an empty label
+        // column; folding it into the last data row destroys both rows.
+        let mut r = rows(&[
+            &["7", "Traditional and Modern Mental Health Organization", "15"],
+            &["", "Total", "27,926"],
+        ]);
+        merge_continuation_rows(&mut r);
+        assert_eq!(r.len(), 2);
+        assert_eq!(r[1][1], "Total");
+    }
+
+    #[test]
+    fn sparse_first_column_disables_continuation_merging() {
+        // Regression: a timetable whose `Notes` column is blank on every run.
+        // Every row looks like a continuation, and merging collapses the whole
+        // table into one row (0.859 -> 0.006 GriTS on ParseBench).
+        let mut r = rows(&[
+            &["", "8:24", "8:28", "8:41"],
+            &["", "8:29", "8:33", "8:46"],
+            &["", "8:33", "8:37", "8:50"],
+            &["", "8:38", "8:42", "8:55"],
+        ]);
+        merge_continuation_rows(&mut r);
+        assert_eq!(r.len(), 4);
+    }
+
+    #[test]
+    fn continuation_may_not_introduce_a_new_column() {
+        let mut r = rows(&[&["Label", "some text", ""], &["", "more text", "brand new"]]);
+        merge_continuation_rows(&mut r);
+        assert_eq!(r.len(), 2, "col 2 was empty above, so this is a real row");
+    }
+
+    #[test]
+    fn fresh_sentence_after_closed_cell_is_not_a_continuation() {
+        let mut r = rows(&[
+            &["Label", "A complete thought ending here."],
+            &["", "Another separate statement entirely."],
+        ]);
+        merge_continuation_rows(&mut r);
+        assert_eq!(r.len(), 2);
+    }
 
     #[test]
     fn gutter_columns_fused_but_narrow_real_column_kept() {
