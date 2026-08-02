@@ -3956,6 +3956,66 @@ fn filter_short_vlines(
     }
 }
 
+/// Widen a boundary list to the extent the *perpendicular* rules imply.
+///
+/// A table drawn with interior dividers but no outer frame gives `xs` that stop
+/// at the first and last vertical rule, so its outermost columns are missing
+/// entirely — every line in them reads as overhang and the component collapses
+/// (doc 182: a 4×4 table came out as the 2×2 grid its interior rules describe,
+/// and all 31 lines tripped the overhang guard). The evidence is already on the
+/// page: the horizontal rules know how wide the table is, and the verticals know
+/// how tall.
+///
+/// Two guards, both load-bearing:
+///   - **median, not min/max** of the perpendicular rules, so one overshooting
+///     stroke cannot widen the grid;
+///   - **the new outer band must hold text**, the same idiom
+///     `collapse_gutter_columns` uses — otherwise a pen-cap overshoot or a
+///     full-width section rule manufactures an empty outer column;
+///   - **the band must be at least `min_band` wide/tall.** Callers pass the
+///     smallest existing row height for the row axis: verticals routinely
+///     overrun the last horizontal by a few points, and a band shorter than any
+///     real row is that overshoot, not a row (doc 45: a 15.5pt tail on 26pt
+///     rows added a phantom row, which was enough for the ruled grid to outrank
+///     a better borderless table and merge five rows into one, TEDS -0.50).
+///     The column axis passes only the clustering tolerance, because an unruled
+///     *label* column is both common and legitimately much narrower than the
+///     ruled data columns it sits beside (doc 182's is 94pt against 259pt).
+fn extend_to_perpendicular_extent(
+    axis: &mut Vec<f32>,
+    perp_los: &[f32],
+    perp_his: &[f32],
+    min_band: f32,
+    has_content: impl Fn(f32, f32) -> bool,
+) {
+    let min_extension = min_band.max(TABLE_COL_BOUNDARY_CLUSTER_PT);
+    let median = |v: &[f32]| {
+        let mut s = v.to_vec();
+        s.sort_by(f32::total_cmp);
+        s.get(s.len() / 2).copied()
+    };
+    let (Some(lo), Some(hi)) = (median(perp_los), median(perp_his)) else {
+        return;
+    };
+    if axis.is_empty() {
+        return;
+    }
+    let dbg = *super::flags::DEBUG_RULED;
+    if lo < axis[0] - min_extension && has_content(lo, axis[0]) {
+        if dbg {
+            eprintln!("[ruled]   extend lo {:.1} -> {:.1}", axis[0], lo);
+        }
+        axis.insert(0, lo);
+    }
+    let last = axis[axis.len() - 1];
+    if hi > last + min_extension && has_content(last, hi) {
+        if dbg {
+            eprintln!("[ruled]   extend hi {last:.1} -> {hi:.1}");
+        }
+        axis.push(hi);
+    }
+}
+
 /// Build a ruled table from one grid component.
 ///
 /// Runs `build_ruled_table_from` twice when short vertical rules are present:
@@ -4052,6 +4112,19 @@ fn build_ruled_table_from(
     let dbg = *super::flags::DEBUG_RULED;
     let mut xs: Vec<f32> = v_kept.iter().map(|&i| vs[i].x).collect();
     xs.sort_by(|a, b| a.total_cmp(b));
+    let spans = || lines.iter().flat_map(|l| l.spans.iter());
+    extend_to_perpendicular_extent(
+        &mut xs,
+        &h_indices.iter().map(|&i| hs[i].x_min).collect::<Vec<_>>(),
+        &h_indices.iter().map(|&i| hs[i].x_max).collect::<Vec<_>>(),
+        0.0,
+        |lo, hi| {
+            spans().filter(|s| !s.text.trim().is_empty()).any(|s| {
+                let c = s.x + s.width * 0.5;
+                c >= lo && c < hi
+            })
+        },
+    );
     // Coarser, mean-centered clustering for column boundaries: cell-border
     // rects contribute paired edges 4-6pt apart that would otherwise become
     // phantom 5pt "columns" the span splitter then shreds text into.
@@ -4089,6 +4162,22 @@ fn build_ruled_table_from(
     } else {
         raw_ys(h_indices)
     };
+    let mut ys = ys;
+    let min_row_band = ys.windows(2).map(|w| w[1] - w[0]).fold(f32::MAX, f32::min);
+    extend_to_perpendicular_extent(
+        &mut ys,
+        &v_kept.iter().map(|&i| vs[i].y_min).collect::<Vec<_>>(),
+        &v_kept.iter().map(|&i| vs[i].y_max).collect::<Vec<_>>(),
+        min_row_band,
+        |lo, hi| {
+            spans().filter(|s| !s.text.trim().is_empty()).any(|s| {
+                let c = s.y + s.height * 0.5;
+                c >= lo && c < hi
+            })
+        },
+    );
+    dedup_close(&mut ys, TABLE_GRID_CLUSTER_PT);
+    let ys = ys;
     if dbg {
         eprintln!(
             "[ruled] component: ys={:?} xs={:?} ({} lines in scope)",
@@ -4992,6 +5081,51 @@ mod tests {
         vs[3].y_max = 49.0;
         let kept = filter_short_vlines(&hs, &[0, 1, 2, 3, 4], &vs, &[0, 1, 2, 3, 4, 5]);
         assert_eq!(kept, vec![0, 1, 2, 3, 4, 5]);
+    }
+
+    #[test]
+    fn unruled_outer_column_is_recovered_from_the_horizontals() {
+        // Interior dividers at 124/383/652; the horizontals say the table runs
+        // 30..930, so the label column and the last data column are missing.
+        let mut xs = vec![123.8, 382.9, 652.1];
+        extend_to_perpendicular_extent(
+            &mut xs,
+            &[29.7, 29.7, 29.8],
+            &[930.3, 930.3, 930.2],
+            0.0,
+            |_, _| true,
+        );
+        assert_eq!(xs, vec![29.7, 123.8, 382.9, 652.1, 930.3]);
+    }
+
+    #[test]
+    fn outer_band_shorter_than_any_row_is_rule_overshoot() {
+        // Verticals overrun the last horizontal by 15.5pt on 26pt rows — a tail,
+        // not a row.
+        let mut ys = vec![181.4, 207.8, 234.2];
+        extend_to_perpendicular_extent(&mut ys, &[181.4], &[249.7], 26.4, |_, _| true);
+        assert_eq!(ys, vec![181.4, 207.8, 234.2]);
+    }
+
+    #[test]
+    fn empty_outer_band_is_not_a_column() {
+        let mut xs = vec![123.8, 382.9, 652.1];
+        extend_to_perpendicular_extent(&mut xs, &[29.7], &[930.3], 0.0, |_, _| false);
+        assert_eq!(xs, vec![123.8, 382.9, 652.1]);
+    }
+
+    #[test]
+    fn one_overshooting_rule_does_not_widen_the_grid() {
+        // Median, not min: a single stroke reaching to 29.7 is noise.
+        let mut xs = vec![123.8, 382.9, 652.1];
+        extend_to_perpendicular_extent(
+            &mut xs,
+            &[29.7, 124.0, 123.9],
+            &[652.0, 652.2, 930.3],
+            0.0,
+            |_, _| true,
+        );
+        assert_eq!(xs, vec![123.8, 382.9, 652.1]);
     }
 
     #[test]
