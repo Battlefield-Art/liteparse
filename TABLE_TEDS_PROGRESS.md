@@ -5,18 +5,22 @@ Goal: close the table-fidelity (TEDS) gap against **pdf-inspector** (firecrawl) 
 
 ## Standing
 
-| metric | baseline (2.10.1) | round 1 (`093ddba`) | round 2 | Δ total | pdf-inspector |
-|---|---|---|---|---|---|
-| **overall** | 0.8732 | 0.8757 | **0.8783** | +0.0051 | 0.8753 |
-| TEDS | 0.6929 | 0.7128 | **0.7441** | **+0.0511** | 0.8141 |
-| MHS | 0.8114 | 0.8175 | **0.8179** | +0.0064 | 0.7879 |
-| NID | 0.9127 | 0.9129 | **0.9136** | +0.0009 | 0.9147 |
+| metric | baseline (2.10.1) | round 1 (`093ddba`) | round 2 (`520413d`) | round 3 | Δ total | pdf-inspector |
+|---|---|---|---|---|---|---|
+| **overall** | 0.8732 | 0.8757 | 0.8783 | **0.8786** | +0.0054 | 0.8753 |
+| TEDS | 0.6929 | 0.7128 | 0.7441 | **0.7471** | **+0.0542** | 0.8141 |
+| MHS | 0.8114 | 0.8175 | 0.8179 | **0.8179** | +0.0065 | 0.7879 |
+| NID | 0.9127 | 0.9129 | 0.9136 | **0.9136** | +0.0009 | 0.9147 |
 
-We lead on overall + MHS, trail on TEDS by **0.070** (was 0.101) and NID by 0.001.
+ParseBench table composite (the mandatory cross-check): 0.4034 → **0.4063** in
+round 3, so this round is positive on *both* benchmarks.
+
+We lead on overall + MHS, trail on TEDS by **0.067** (was 0.101) and NID by 0.001.
 **TEDS is scored on only 42 of the 200 docs**, so one doc = 0.024 of the mean.
 
-Round 1 shipped as `093ddba`; round 2 adds ~190 lines, all still in
-`crates/liteparse/src/markdown_layout/tables.rs`. 298 lib tests pass.
+Round 1 shipped as `093ddba`, round 2 as `520413d`; round 3 is ~120 lines in
+`crates/liteparse/src/markdown_layout/tables.rs` plus one line in `parser.rs`.
+303 lib tests pass.
 
 ## What shipped
 
@@ -70,6 +74,36 @@ Round 1 shipped as `093ddba`; round 2 adds ~190 lines, all still in
      line" if the first column is a *label* column; plenty of tables just have a
      sparse one.
 
+## What shipped — round 3 (word-geometry column splitting)
+
+5. **Split PDFium's merged multi-cell runs on real word geometry**
+   (+0.0030 odl TEDS, +0.0029 ParseBench table, +0.0009 NID; docs 189 and 190
+   up, **nothing down on either benchmark**).
+
+   This is the root of the "track chicken-and-egg" recorded as the table
+   quality ceiling: the detector needs column tracks to split a merged run, but
+   the merged runs are exactly where the track evidence lives. Word boxes break
+   the cycle — the gutter is visible in the geometry *before* any table
+   hypothesis exists. Measured on doc 190's header: in-cell word gaps 1.76pt,
+   column gutters 7.7–12.2pt.
+
+   - `split_span_at_gutters(span)` splits one run at its internal gutters;
+     `line_pieces(line)` is the tabular view of a row. A run is now what PDFium
+     emitted; a *piece* is what the page calls a cell.
+   - Wired into all three places that previously reasoned over raw spans:
+     `infer_tracks_from_raw_items` (a single merged run now witnesses its own
+     columns), `is_strong_row`, and `cells_from_raw_items_with_tracks`.
+   - `parser.rs` forces `emit_word_boxes` on for markdown output. Cost measured
+     at ~3% user CPU over 40 docs.
+
+   **The threshold must be relative, never absolute.** The same 4pt gap is a
+   gutter in 6pt type and an ordinary space in 12pt type — this is the same
+   trap recorded in the missing-spaces work. Instead, sort the run's own gaps
+   and look for a bimodal jump: real gutters run 3.4–4.4× the in-cell gap,
+   while fully-justified prose (the one reliable counterfeit) tops out ~1.3×.
+   Requires ≥3 words, since two words give one gap with nothing to compare it
+   to. Unit tests cover both the firing case and the justified-prose case.
+
 ## Cross-benchmark check is mandatory for table work
 
 **opendataloader-bench alone is not enough.** Round 2 looked perfect on it — four
@@ -109,10 +143,23 @@ that report in place**, so copy it aside before running a variant.
   tuned bench config and prints the delta vs `prediction/liteparse` (the frozen 2.10.1
   baseline). Verified byte-identical to the recorded baseline on all 200 docs.
   Takes ~1–2 min. **Always A/B; per-doc deltas matter more than the mean.**
+- **Geometry dumps** (`crates/liteparse/examples/`, run with
+  `cargo run -q --release -p liteparse --example <name> -- <pdf>`):
+  `dump_rects_raw` prints every graphic primitive plus each text item with its
+  word boxes and inter-word gaps — this is what made the gutter signal visible;
+  `dump_chars_raw <pdf> <page> <ymin> <ymax>` drops to per-character boxes.
+  `dump_table_rects` gives the h/v stroke counts per page, which is how you tell
+  a booktabs table (`h_strokes=6 v_strokes=0`) from a fully ruled one.
+  Beware: vector-drawn math glyphs show up as ~170 tiny `stroked_rects` and can
+  produce a phantom table rect (doc 165).
 - **Debug envs**: `LITEPARSE_DEBUG_TABLE=1 LITEPARSE_DEBUG_RULED=1` on a single
   `lit parse ... --format markdown --image-mode off --no-ocr --no-links -q`.
   These print every gate rejection with its numbers. **Use these first** — twice I
   inferred a mechanism from the emitted markdown and was wrong.
+  `LITEPARSE_DEBUG_GUTTER=1` prints every in-run column split with its ratio.
+- **Never rebuild the binary while a bench run is in flight** — both harnesses
+  shell out to `target/release/lit`, so a mid-run `cargo build` silently mixes
+  two variants into one score.
 - **pdf-inspector repro**: `git clone --depth 1 https://github.com/firecrawl/pdf-inspector`,
   `cargo build --release --bin pdf2md` (~28s), run `pdf2md <pdf> --raw`. Its outputs and
   scores are already committed at `opendataloader-bench/prediction/pdf-inspector/`.
@@ -152,12 +199,32 @@ So the dominant problem is **misfiling**, not dropping, text.
    Related: `TABLE_MAX_EMPTY_CELL_FRACTION` cannot be relaxed (see below), so this needs
    a different route — likely the tagged struct tree (item 5).
 
-5. **Tagged `/Table` structure tree — unused by us entirely.** pdf-inspector's *highest
-   priority* detector (`detect_struct.rs`): walks StructTreeRoot for `/Table` `/TR`
-   `/TD`, links cells to text via **MCID**, gates on coverage (0.3 internal, 0.5 of band
-   items). We already parse `struct_nodes` (`extract.rs:134`, exposed on `ParsedPage`)
-   but consume it *only* for heading levels (`classify.rs:622`). The plumbing exists;
-   the detector does not. Biggest structural bet available.
+5. ~~**Tagged `/Table` structure tree**~~ — **DEAD. Do not build this.** Measured
+   before writing any code: **0 of the 200 opendataloader-bench PDFs carry a
+   structure tree at all**, and 0 of the first 120 ParseBench docs do either.
+   A tagged-`/Table` detector would be pure dead code against every benchmark we
+   optimize. The extractor is fine — verified against a LibreOffice-exported
+   tagged PDF, which returns the full `Document > Table > TR > TH/TD` tree — the
+   corpora are simply untagged. pdf-inspector's lead comes from somewhere else.
+   Probe: `lit parse <pdf> --format json --extract-structure-tree` and count
+   nodes under `pages[].structure_tree.roots`. Still worth having for *real
+   user* documents someday, but it can never show up in these numbers.
+
+6. **Sub-word tracks are still on the table.** Round 3 uses word boxes only to
+   split runs into pieces. `split_text_at_x_anchors` still locates a split by
+   *linear interpolation over character index*, which is why doc 83 emits
+   `10 .1%`. Feeding real word x's into that function is the obvious next step.
+
+7. **Doc 190's last row (`Merge v4 | SLERP`, −0.126).** The header row is fixed;
+   the final body row still falls out because its second cell (`SLERP`, x=182.9)
+   sits 14pt off the track inferred from the rows above (`Average`, x=168) —
+   past the 6pt `TABLE_TRACK_TOLERANCE_PT`. Needs track *ranges* rather than
+   points; touch with care, that tolerance gates several paths.
+
+8. **Docs 81/83/84 (same source family, −0.64 summed).** One grid component
+   spans two stacked tables, so each is evaluated with the other's rows empty
+   and both die on `empty-frac 0.60`. See the trim experiment in negative
+   results for what does *not* work.
 
 ## Negative results — do not retry blind
 
@@ -175,6 +242,22 @@ So the dominant problem is **misfiling**, not dropping, text.
 - **Restricting the 2-row relaxation to table-free gaps, with no content gate**:
   doc 147 still −0.822, 14 docs lose NID (−0.0030). The gap restriction addresses the
   wrong mechanism. Justified prose is the counterfeit, and it lives *in* the gaps.
+- **Trimming fully-empty edge rows off a ruled grid** (aimed at docs 81/83/84,
+  where one component covers two stacked tables so each sees the other's rows as
+  empty). Tried four increasingly-gated variants; all net-negative or a wash:
+  | variant | odl TEDS vs round 3 |
+  |---|---|
+  | trim unconditionally | −0.0122 (docs 130, 127, 81 fall from ~1.0 to ~0.75) |
+  | trim only if the untrimmed grid fails the density gate | identical — the pre-check is not predictive, `flatten_header_band` / `merge_stacked_header` rescue those grids *later* |
+  | retry trimmed only after the untrimmed build returns `None` | identical again |
+  | + strict density on the retained block, + require ≥3 trimmed rows and ≥4 kept | −0.0006 (83 +0.084, 84 +0.066, 81 −0.119, 82 −0.055) |
+
+  The mechanism the gating missed: the trimmed run doesn't fill a hole, it
+  **outranks a better table another detector already produced**. Docs 81/127
+  regress because the ruled run wins with one column too many
+  (`Number | of clauses` split across two columns) over a correct borderless
+  table. Fixing this class needs either detector-priority plumbing or splitting
+  the *component* — not a post-hoc row trim. Reverted; not in the shipped diff.
 - **A second full-width-spanner guard in `flatten_header_band`** (reject the flatten
   when a produced header cell exceeds 100 chars, aimed at doc 200): **exactly zero
   delta** — this is the second guard to die here. The `[ruled] colspan header flatten`

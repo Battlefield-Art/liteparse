@@ -483,7 +483,11 @@ impl LiteParse {
                 extract::ExtractionOutputOptions {
                     extract_content_bounds: self.config.extract_content_bounds,
                     extract_images: self.config.effective_extract_images(),
-                    emit_word_boxes: self.config.emit_word_boxes,
+                    // The markdown table detector splits PDFium's merged
+                    // multi-cell runs on real word geometry, so it needs word
+                    // boxes even when the caller didn't ask for them.
+                    emit_word_boxes: self.config.emit_word_boxes
+                        || self.config.output_format == crate::config::OutputFormat::Markdown,
                     extract_text_metadata: self.config.extract_text_metadata,
                     extract_vector_graphics: self.config.extract_vector_graphics,
                     extract_annotations: self.config.extract_annotations,

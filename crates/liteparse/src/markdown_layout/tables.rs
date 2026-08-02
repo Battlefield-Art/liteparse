@@ -46,6 +46,165 @@ const TABLE_ROW_GAP_MULTIPLIER: f32 = 2.5;
 /// (rejecting irregular spacing that's more likely prose or a footer block).
 const TABLE_ROW_SPACING_MAX_CV: f32 = 0.5;
 
+/// Minimum ratio between the smallest "wide" inter-word gap and the largest
+/// ordinary one for a span's internal gaps to read as bimodal — i.e. for the
+/// wide ones to be column gutters rather than stretched justification spaces.
+///
+/// Measured separation is large: real gutters run 3.4–4.4× the in-cell word
+/// gap (7.29 vs 2.13 on a booktabs worksheet header, 7.73 vs 1.76 on a
+/// two-column-label results table), while fully-justified prose — the one
+/// thing that reliably counterfeits column structure — tops out around 1.3×.
+const SPAN_GUTTER_MIN_RATIO: f32 = 2.5;
+
+/// Absolute floor (points) on a gap treated as an in-span column gutter, so
+/// tightly-kerned small text can't manufacture columns out of a 1pt jitter.
+const SPAN_GUTTER_MIN_PT: f32 = 3.0;
+
+/// One horizontal piece of a PDFium text run: the run split at its internal
+/// column gutters. Most runs yield a single piece.
+#[derive(Debug, Clone)]
+pub(super) struct SpanPiece<'a> {
+    pub(super) x: f32,
+    pub(super) end_x: f32,
+    pub(super) text: String,
+    /// The run this piece came from — for bold/font lookups.
+    pub(super) span: &'a TextItem,
+}
+
+/// Split one PDFium run into column pieces at its internal gutters.
+///
+/// PDFium routinely emits a whole table row — several cells — as a single run,
+/// which is the root of the track chicken-and-egg: the detector needs tracks to
+/// split runs, but the runs are where the track evidence lives. Word boxes
+/// break the cycle, because the gutter is plainly visible in the geometry
+/// before any table hypothesis exists.
+///
+/// Detection is *relative to the run itself*, never a constant threshold: sort
+/// the inter-word gaps, find the largest ratio jump, and accept the split only
+/// when that jump clears [`SPAN_GUTTER_MIN_RATIO`]. A fixed gap threshold
+/// cannot work here — the same 4pt gap is a gutter in 6pt type and an ordinary
+/// space in 12pt type.
+///
+/// Returns a single piece covering the whole run when it has no word boxes,
+/// fewer than three words, or no bimodal gap.
+pub(super) fn split_span_at_gutters(span: &TextItem) -> Vec<SpanPiece<'_>> {
+    let whole = || {
+        vec![SpanPiece {
+            x: span.x,
+            end_x: span.x + span.width.max(0.0),
+            text: collapse_whitespace(span.text.trim()),
+            span,
+        }]
+    };
+    // Only words that lie within this run's own x-extent count: projection can
+    // append a merged neighbour's word boxes onto a run without re-slicing the
+    // text, so `words` is a superset in that case.
+    let x1 = span.x + span.width.max(0.0);
+    let words: Vec<&crate::types::WordBox> = span
+        .words
+        .iter()
+        .filter(|w| !w.text.trim().is_empty() && w.x >= span.x - 1.0 && w.x <= x1 + 1.0)
+        .collect();
+    // Two words give exactly one gap, which is trivially "the largest" — no
+    // ratio to test against, so there is no evidence of bimodality.
+    if words.len() < 3 {
+        return whole();
+    }
+    // The word list must actually reconstruct the run's text, or the split
+    // points would not correspond to the text we are about to slice.
+    let rebuilt = collapse_whitespace(
+        &words
+            .iter()
+            .map(|w| w.text.trim())
+            .collect::<Vec<_>>()
+            .join(" "),
+    );
+    if rebuilt != collapse_whitespace(span.text.trim()) {
+        return whole();
+    }
+
+    let gaps: Vec<f32> = words
+        .windows(2)
+        .map(|w| w[1].x - (w[0].x + w[0].width.max(0.0)))
+        .collect();
+    let mut sorted = gaps.clone();
+    sorted.sort_by(f32::total_cmp);
+    // Largest ratio jump between adjacent sorted gaps: the boundary between
+    // "ordinary space" and "gutter", if there is one.
+    let mut cut = None;
+    let mut best_ratio = SPAN_GUTTER_MIN_RATIO;
+    for i in 0..sorted.len() - 1 {
+        let (lo, hi) = (sorted[i], sorted[i + 1]);
+        if hi < SPAN_GUTTER_MIN_PT {
+            continue;
+        }
+        let ratio = hi / lo.max(0.1);
+        if ratio >= best_ratio {
+            best_ratio = ratio;
+            cut = Some(hi);
+        }
+    }
+    let Some(threshold) = cut else {
+        return whole();
+    };
+
+    let mut pieces: Vec<SpanPiece<'_>> = Vec::new();
+    let mut current: Vec<&crate::types::WordBox> = vec![words[0]];
+    for (i, gap) in gaps.iter().enumerate() {
+        if *gap >= threshold {
+            pieces.push(piece_from_words(&current, span));
+            current.clear();
+        }
+        current.push(words[i + 1]);
+    }
+    pieces.push(piece_from_words(&current, span));
+    pieces.retain(|p| !p.text.is_empty());
+    if pieces.len() < 2 {
+        return whole();
+    }
+    if *super::flags::DEBUG_GUTTER {
+        eprintln!(
+            "[gutter] thr={:.2} ratio={:.2} {:?}",
+            threshold,
+            best_ratio,
+            pieces.iter().map(|p| p.text.as_str()).collect::<Vec<_>>()
+        );
+    }
+    pieces
+}
+
+fn piece_from_words<'a>(words: &[&crate::types::WordBox], span: &'a TextItem) -> SpanPiece<'a> {
+    let x = words.first().map_or(span.x, |w| w.x);
+    let end_x = words
+        .last()
+        .map_or(span.x + span.width.max(0.0), |w| w.x + w.width.max(0.0));
+    SpanPiece {
+        x,
+        end_x,
+        text: collapse_whitespace(
+            &words
+                .iter()
+                .map(|w| w.text.trim())
+                .collect::<Vec<_>>()
+                .join(" "),
+        ),
+        span,
+    }
+}
+
+/// All column pieces on a line, left to right. This is the tabular view of a
+/// row: what PDFium calls a run is not what the page calls a cell.
+pub(super) fn line_pieces(line: &ProjectedLine) -> Vec<SpanPiece<'_>> {
+    let mut pieces: Vec<SpanPiece<'_>> = line
+        .spans
+        .iter()
+        .filter(|s| !s.text.trim().is_empty())
+        .flat_map(split_span_at_gutters)
+        .collect();
+    pieces.sort_by(|a, b| a.x.total_cmp(&b.x));
+    pieces
+}
+
 /// One cell within a tabular row: contributing spans aggregated to text and
 /// its leftmost x position, used to align cells across rows into column
 /// "tracks".
@@ -344,12 +503,9 @@ const TABLE_TRACK_INFERENCE_MAX_ROWS: usize = 12;
 fn infer_tracks_from_raw_items(lines: &[ProjectedLine], start_idx: usize) -> Vec<f32> {
     let mut xs: Vec<f32> = Vec::new();
     let push_row_xs = |xs: &mut Vec<f32>, line: &ProjectedLine| {
-        let row_xs: Vec<f32> = line
-            .spans
-            .iter()
-            .filter(|s| !s.text.trim().is_empty())
-            .map(|s| s.x)
-            .collect();
+        // Piece x's, not span x's: a row PDFium emitted as one merged run
+        // still witnesses its columns through its internal gutters.
+        let row_xs: Vec<f32> = line_pieces(line).iter().map(|p| p.x).collect();
         // Skip 0- or 1-item rows — they don't carry column info and can
         // introduce noise from single-cell prose lines.
         if row_xs.len() >= 2 {
@@ -419,17 +575,12 @@ fn cells_from_raw_items_with_tracks(
     line: &ProjectedLine,
     tracks: &[f32],
 ) -> Option<Vec<TableCell>> {
-    let mut spans: Vec<&TextItem> = line
-        .spans
-        .iter()
-        .filter(|s| !s.text.trim().is_empty())
-        .collect();
-    spans.sort_by(|a, b| a.x.total_cmp(&b.x));
-    // Require ≥ 2 PDFium spans on the row. A 1-span row spanning multiple
-    // tracks is almost always prose (wrapped paragraph whose x-range
+    let spans = line_pieces(line);
+    // Require ≥ 2 column pieces on the row. A single-piece row spanning
+    // multiple tracks is almost always prose (wrapped paragraph whose x-range
     // happens to overlap the track region); shredding it at whitespace
     // anchors corrupts the body text. Real merged-numeric table rows still
-    // have a label span and a values span (≥ 2).
+    // have a label piece and a values piece (≥ 2).
     if spans.len() < 2 {
         return None;
     }
@@ -455,7 +606,7 @@ fn cells_from_raw_items_with_tracks(
     };
     for span in &spans {
         let x0 = span.x;
-        let x1 = span.x + span.width.max(0.0);
+        let x1 = span.end_x;
         let covered: Vec<usize> = tracks
             .iter()
             .enumerate()
@@ -480,13 +631,18 @@ fn cells_from_raw_items_with_tracks(
                 let idx = covered[0];
                 push_text(&mut cells[idx].text, &span.text);
                 cells[idx].end_x = cells[idx].end_x.max(x1);
-                if is_bold_item(span) {
+                if is_bold_item(span.span) {
                     cells[idx].bold = true;
                 }
             }
             _ => {
-                let pieces = split_span_at_anchors(span, &covered, tracks)?;
-                let bold = is_bold_item(span);
+                let pieces = split_text_at_x_anchors(
+                    &span.text,
+                    span.x,
+                    span.end_x - span.x,
+                    &covered[1..].iter().map(|&i| tracks[i]).collect::<Vec<_>>(),
+                )?;
+                let bold = is_bold_item(span.span);
                 for (idx, piece) in covered.iter().zip(pieces.iter()) {
                     if piece.is_empty() {
                         return None;
@@ -768,17 +924,13 @@ fn try_detect_table_inferred(
     // and the table would fall to the header-seeded path that drops a column.
     let tol = TABLE_TRACK_TOLERANCE_PT;
     let is_strong_row = |line: &ProjectedLine| -> bool {
-        let spans: Vec<&TextItem> = line
-            .spans
-            .iter()
-            .filter(|s| !s.text.trim().is_empty())
-            .collect();
+        let spans = line_pieces(line);
         if spans.len() < tracks.len() {
             return false;
         }
         spans.iter().all(|s| {
             let x0 = s.x;
-            let x1 = s.x + s.width.max(0.0);
+            let x1 = s.end_x;
             tracks
                 .iter()
                 .filter(|&&t| t >= x0 - tol && t <= x1 + tol)
@@ -4063,6 +4215,86 @@ mod tests {
     use super::super::test_helpers::{line, line_with_spans, rect_borders, stroke};
     use super::*;
 
+    /// One PDFium run whose words sit at the given (x, width) positions.
+    fn run_with_words(words: &[(&str, f32, f32)]) -> TextItem {
+        let x = words[0].1;
+        let last = words[words.len() - 1];
+        TextItem {
+            text: words
+                .iter()
+                .map(|(t, _, _)| *t)
+                .collect::<Vec<_>>()
+                .join(" "),
+            x,
+            width: last.1 + last.2 - x,
+            height: 10.0,
+            font_size: Some(10.0),
+            words: words
+                .iter()
+                .map(|(t, wx, ww)| crate::types::WordBox {
+                    text: (*t).into(),
+                    x: *wx,
+                    y: 0.0,
+                    width: *ww,
+                    height: 10.0,
+                })
+                .collect(),
+            ..Default::default()
+        }
+    }
+
+    fn piece_texts(span: &TextItem) -> Vec<String> {
+        split_span_at_gutters(span)
+            .into_iter()
+            .map(|p| p.text)
+            .collect()
+    }
+
+    #[test]
+    fn merged_run_splits_at_its_column_gutters() {
+        // doc 190's header: PDFium emits eight cells as one run. In-cell word
+        // gaps are 1.76pt; the gutters are 7.7–12.2pt.
+        let span = run_with_words(&[
+            ("Merge", 172.5, 18.3),
+            ("Method", 192.5, 21.9),
+            ("H6", 226.6, 8.6),
+            ("(Avg.)", 237.0, 18.1),
+            ("ARC", 263.5, 14.5),
+        ]);
+        assert_eq!(piece_texts(&span), ["Merge Method", "H6 (Avg.)", "ARC"]);
+    }
+
+    #[test]
+    fn justified_prose_does_not_split() {
+        // Justification stretches spaces to 3.4pt against a 2.73pt norm — a
+        // 1.25× jump, far under the bimodality bar. This is the counterfeit the
+        // ratio test exists to reject.
+        let span = run_with_words(&[
+            ("may", 306.1, 19.0),
+            ("not", 327.8, 14.1),
+            ("be", 344.6, 10.4),
+            ("as", 357.8, 9.2),
+            ("crucial.", 369.7, 32.7),
+            ("Thus,", 405.8, 24.8),
+            ("we", 433.3, 12.8),
+        ]);
+        assert_eq!(piece_texts(&span).len(), 1);
+    }
+
+    #[test]
+    fn run_without_word_boxes_stays_whole() {
+        let mut span = run_with_words(&[("A", 0.0, 5.0), ("B", 20.0, 5.0), ("C", 26.0, 5.0)]);
+        span.words.clear();
+        assert_eq!(piece_texts(&span), ["A B C"]);
+    }
+
+    #[test]
+    fn two_word_run_has_no_bimodality_to_measure() {
+        // One gap is trivially the largest; there is nothing to compare it to.
+        let span = run_with_words(&[("Added", 60.3, 24.1), ("Relative", 118.0, 31.1)]);
+        assert_eq!(piece_texts(&span), ["Added Relative"]);
+    }
+
     fn rows(v: &[&[&str]]) -> Vec<Vec<String>> {
         v.iter()
             .map(|r| r.iter().map(|s| s.to_string()).collect())
@@ -4072,7 +4304,10 @@ mod tests {
     #[test]
     fn wrapped_cell_lines_fold_into_their_row() {
         let mut r = rows(&[
-            &["Knowledge", "● To understand the meaning of reducing and recycling"],
+            &[
+                "Knowledge",
+                "● To understand the meaning of reducing and recycling",
+            ],
             &["", "and how they connect ● To be familiar with the 7 Rs"],
             &["Skills", "● To implement waste management into daily"],
             &["", "life ● To promote reducing before recycling"],
@@ -4091,7 +4326,11 @@ mod tests {
         // Regression: doc 45/47. A `Total` line legitimately has an empty label
         // column; folding it into the last data row destroys both rows.
         let mut r = rows(&[
-            &["7", "Traditional and Modern Mental Health Organization", "15"],
+            &[
+                "7",
+                "Traditional and Modern Mental Health Organization",
+                "15",
+            ],
             &["", "Total", "27,926"],
         ]);
         merge_continuation_rows(&mut r);
