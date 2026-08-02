@@ -69,6 +69,10 @@ pub(super) struct SpanPiece<'a> {
     pub(super) text: String,
     /// The run this piece came from — for bold/font lookups.
     pub(super) span: &'a TextItem,
+    /// The piece's own word boxes, in reading order, but **only** when they
+    /// were verified to reconstruct `text` exactly. Empty otherwise, so a
+    /// consumer can treat non-empty as "real geometry for every word here".
+    pub(super) words: Vec<&'a crate::types::WordBox>,
 }
 
 /// Split one PDFium run into column pieces at its internal gutters.
@@ -87,31 +91,22 @@ pub(super) struct SpanPiece<'a> {
 ///
 /// Returns a single piece covering the whole run when it has no word boxes,
 /// fewer than three words, or no bimodal gap.
-pub(super) fn split_span_at_gutters(span: &TextItem) -> Vec<SpanPiece<'_>> {
-    let whole = || {
-        vec![SpanPiece {
-            x: span.x,
-            end_x: span.x + span.width.max(0.0),
-            text: collapse_whitespace(span.text.trim()),
-            span,
-        }]
-    };
-    // Only words that lie within this run's own x-extent count: projection can
-    // append a merged neighbour's word boxes onto a run without re-slicing the
-    // text, so `words` is a superset in that case.
+/// A run's own word boxes, in reading order, but only when they reconstruct the
+/// run's text exactly. Anything less and the boxes can't be used to slice the
+/// text, because the split points wouldn't correspond to it.
+///
+/// The x-filter matters: projection can append a merged neighbour's word boxes
+/// onto a run without re-slicing the text, making `span.words` a superset.
+pub(super) fn verified_words(span: &TextItem) -> Option<Vec<&crate::types::WordBox>> {
     let x1 = span.x + span.width.max(0.0);
     let words: Vec<&crate::types::WordBox> = span
         .words
         .iter()
         .filter(|w| !w.text.trim().is_empty() && w.x >= span.x - 1.0 && w.x <= x1 + 1.0)
         .collect();
-    // Two words give exactly one gap, which is trivially "the largest" — no
-    // ratio to test against, so there is no evidence of bimodality.
-    if words.len() < 3 {
-        return whole();
+    if words.is_empty() {
+        return None;
     }
-    // The word list must actually reconstruct the run's text, or the split
-    // points would not correspond to the text we are about to slice.
     let rebuilt = collapse_whitespace(
         &words
             .iter()
@@ -119,7 +114,26 @@ pub(super) fn split_span_at_gutters(span: &TextItem) -> Vec<SpanPiece<'_>> {
             .collect::<Vec<_>>()
             .join(" "),
     );
-    if rebuilt != collapse_whitespace(span.text.trim()) {
+    (rebuilt == collapse_whitespace(span.text.trim())).then_some(words)
+}
+
+pub(super) fn split_span_at_gutters(span: &TextItem) -> Vec<SpanPiece<'_>> {
+    let verified_list = verified_words(span);
+    let words: Vec<&crate::types::WordBox> = verified_list.clone().unwrap_or_default();
+    let verified = verified_list.is_some();
+    let whole = || {
+        vec![SpanPiece {
+            x: span.x,
+            end_x: span.x + span.width.max(0.0),
+            text: collapse_whitespace(span.text.trim()),
+            span,
+            words: if verified { words.clone() } else { Vec::new() },
+        }]
+    };
+    // Two words give exactly one gap, which is trivially "the largest" — no
+    // ratio to test against, so there is no evidence of bimodality. The piece
+    // still carries its words, so a track-driven split can use them later.
+    if words.len() < 3 || !verified {
         return whole();
     }
 
@@ -173,7 +187,10 @@ pub(super) fn split_span_at_gutters(span: &TextItem) -> Vec<SpanPiece<'_>> {
     pieces
 }
 
-fn piece_from_words<'a>(words: &[&crate::types::WordBox], span: &'a TextItem) -> SpanPiece<'a> {
+fn piece_from_words<'a>(
+    words: &[&'a crate::types::WordBox],
+    span: &'a TextItem,
+) -> SpanPiece<'a> {
     let x = words.first().map_or(span.x, |w| w.x);
     let end_x = words
         .last()
@@ -189,6 +206,7 @@ fn piece_from_words<'a>(words: &[&crate::types::WordBox], span: &'a TextItem) ->
                 .join(" "),
         ),
         span,
+        words: words.to_vec(),
     }
 }
 
@@ -636,12 +654,12 @@ fn cells_from_raw_items_with_tracks(
                 }
             }
             _ => {
-                let pieces = split_text_at_x_anchors(
-                    &span.text,
-                    span.x,
-                    span.end_x - span.x,
-                    &covered[1..].iter().map(|&i| tracks[i]).collect::<Vec<_>>(),
-                )?;
+                let anchors: Vec<f32> = covered[1..].iter().map(|&i| tracks[i]).collect();
+                // Real word x's first; the character-index estimate only when
+                // this piece has no verified word geometry to cut on.
+                let pieces = split_words_at_x_anchors(&span.words, &anchors).or_else(|| {
+                    split_text_at_x_anchors(&span.text, span.x, span.end_x - span.x, &anchors)
+                })?;
                 let bold = is_bold_item(span.span);
                 for (idx, piece) in covered.iter().zip(pieces.iter()) {
                     if piece.is_empty() {
@@ -697,6 +715,55 @@ fn is_value_like(text: &str) -> bool {
 /// usable whitespace boundary (e.g. unbroken text like a long hex string).
 /// Pieces may be empty strings — callers that require non-empty pieces must
 /// check.
+/// Split a word sequence into `anchors.len() + 1` pieces using the words' own
+/// x positions: each anchor picks the inter-word boundary whose following word
+/// starts closest to it.
+///
+/// This is the geometric counterpart of [`split_text_at_x_anchors`], which can
+/// only *interpolate* an x from a character index and so assumes every glyph is
+/// the same width — false for any proportional font, and the reason a split can
+/// land one character off (`10 .1%`). Prefer this whenever the piece carries
+/// verified word boxes.
+///
+/// Returns `None` when there are too few words to host every anchor, when two
+/// anchors want the same boundary, or when an anchor's nearest boundary is
+/// further away than the track tolerance — a miss that large means no word
+/// actually starts at this column, so the caller should fall back rather than
+/// cut where the geometry says nothing happens.
+fn split_words_at_x_anchors(
+    words: &[&crate::types::WordBox],
+    anchors: &[f32],
+) -> Option<Vec<String>> {
+    if anchors.is_empty() || words.len() < anchors.len() + 1 {
+        return None;
+    }
+    let mut cuts: Vec<usize> = Vec::with_capacity(anchors.len());
+    for &target in anchors {
+        let (k, dist) = (1..words.len())
+            .filter(|k| !cuts.contains(k))
+            .map(|k| (k, (words[k].x - target).abs()))
+            .min_by(|a, b| a.1.total_cmp(&b.1))?;
+        if dist > TABLE_TRACK_TOLERANCE_PT {
+            return None;
+        }
+        cuts.push(k);
+    }
+    cuts.sort_unstable();
+    let mut pieces: Vec<String> = Vec::with_capacity(cuts.len() + 1);
+    let mut prev = 0usize;
+    for &k in cuts.iter().chain(std::iter::once(&words.len())) {
+        pieces.push(collapse_whitespace(
+            &words[prev..k]
+                .iter()
+                .map(|w| w.text.trim())
+                .collect::<Vec<_>>()
+                .join(" "),
+        ));
+        prev = k;
+    }
+    Some(pieces)
+}
+
 fn split_text_at_x_anchors(
     text: &str,
     x0: f32,
@@ -2986,6 +3053,11 @@ struct CellGrid {
     /// Per-row flag: the row contains an alpha-dominant multi-column span (a
     /// group-header label, as opposed to a mostly-digit merged data run).
     row_alpha_spanner: Vec<bool>,
+    /// Per-cell flag: the rules say this cell is vertically merged with the one
+    /// above it, so it is empty by construction. See `count_rowspan_cells`.
+    /// Travels with the row/column collapses so the density gate forgives the
+    /// empties that are actually here, not ones from a discarded row.
+    spanned: Vec<Vec<bool>>,
 }
 
 impl CellGrid {
@@ -2996,6 +3068,7 @@ impl CellGrid {
             has_text: vec![vec![false; n_cols]; n_rows],
             repl: vec![vec![String::new(); n_cols]; n_rows],
             row_alpha_spanner: vec![false; n_rows],
+            spanned: vec![vec![false; n_cols]; n_rows],
         }
     }
 
@@ -3042,6 +3115,7 @@ impl CellGrid {
         self.has_text = filter_by(std::mem::take(&mut self.has_text), keep);
         self.repl = filter_by(std::mem::take(&mut self.repl), keep);
         self.row_alpha_spanner = filter_by(std::mem::take(&mut self.row_alpha_spanner), keep);
+        self.spanned = filter_by(std::mem::take(&mut self.spanned), keep);
     }
 
     /// Keep only columns `c` where `keep[c]`; the per-cell layers filter, the
@@ -3060,6 +3134,10 @@ impl CellGrid {
             .map(|row| filter_by(row, keep))
             .collect();
         self.repl = std::mem::take(&mut self.repl)
+            .into_iter()
+            .map(|row| filter_by(row, keep))
+            .collect();
+        self.spanned = std::mem::take(&mut self.spanned)
             .into_iter()
             .map(|row| filter_by(row, keep))
             .collect();
@@ -3267,7 +3345,18 @@ fn assign_cells(
             // nearest each crossed boundary x (xs[k] is column k's left
             // boundary, which is exactly the split target).
             let covered: Vec<usize> = (c_lo..=c_hi).collect();
-            if let Some(pieces) = split_span_at_anchors(span, &covered, xs) {
+            // Prefer real word geometry: each word lands in the ruled column
+            // its own centre falls in, which is exact. `split_span_at_anchors`
+            // has to guess an x from a character index, so on a proportional
+            // font it can cut a word or two off from the true boundary.
+            if let Some(by_word) = bucket_words_into_columns(span, xs) {
+                for (col, text) in by_word {
+                    grid.push_text(row, col, &text);
+                    if !line.all_bold {
+                        grid.is_bold[row][col] = false;
+                    }
+                }
+            } else if let Some(pieces) = split_span_at_anchors(span, &covered, xs) {
                 for (k, piece) in pieces.iter().enumerate() {
                     grid.push_text(row, c_lo + k, piece);
                     if !line.all_bold {
@@ -3460,7 +3549,11 @@ fn merge_stacked_header(
 }
 
 /// Density gate: a grid that is mostly empty cells is rejected unless it shows
-/// strong table evidence. Three escape hatches keep real tables:
+/// strong table evidence. Cells the rules say are vertically merged into the
+/// cell above (`spanned`) don't count as empty at all — they are empty by
+/// construction, and a rowspan label column ("1. Embodying sustainability
+/// values" beside three competence rows) otherwise reads as a sparse grid and
+/// dies here. Beyond that, three escape hatches keep real tables:
 /// - **col0 spine**: a filled, short-text first column (a label column).
 /// - **long-prose table**: a large (≥5×3) grid with a bold header band covering
 ///   ≥3 columns and a dense (≥70%-fill) inner description column — a
@@ -3474,6 +3567,59 @@ fn merge_stacked_header(
 ///
 /// Returns `true` to keep the table, `false` to reject it.
 ///
+/// Mark the grid cells that are *vertically merged* with the cell above them,
+/// read straight off the rules: a cell whose top boundary carries no horizontal
+/// stroke across its own column is the continuation of a rowspan.
+///
+/// This is the geometric explanation for legitimately-empty cells. Every
+/// interior `ys` boundary exists because *some* horizontal segment sits there,
+/// so a column only scores when that particular rule stops short of it — which
+/// is exactly how a PDF draws a merged cell. A fully-ruled grid scores zero.
+fn rowspan_mask(
+    hs: &[HSeg],
+    h_indices: &[usize],
+    vs: &[VSeg],
+    v_indices: &[usize],
+    xs: &[f32],
+    ys: &[f32],
+) -> Vec<Vec<bool>> {
+    let tol = TABLE_GRID_CLUSTER_PT;
+    let mut mask = vec![vec![false; xs.len() - 1]; ys.len() - 1];
+    for (r, &y) in ys[1..ys.len() - 1].iter().enumerate() {
+        // Row `r + 1` is the one below boundary `ys[r + 1]`.
+        let row = r + 1;
+        // Some vertical rule must run *through* the boundary. That is what
+        // distinguishes "the grid continues, this one cell is merged" from
+        // "the grid ended here" — a page-frame component whose stray rules
+        // cross unruled prose has no vertical continuing past them, and
+        // forgiving its empties would turn body text into a two-column table.
+        let grid_continues = v_indices
+            .iter()
+            .map(|&i| &vs[i])
+            .any(|v| v.y_min <= y - tol && v.y_max >= y + tol);
+        if !grid_continues {
+            continue;
+        }
+        let at_y: Vec<&HSeg> = h_indices
+            .iter()
+            .map(|&i| &hs[i])
+            .filter(|h| (h.y - y).abs() <= tol)
+            .collect();
+        for c in 0..xs.len() - 1 {
+            // Test the column's *centre*, not containment of the whole column:
+            // `xs` comes from clustered and gutter-collapsed boundaries, so the
+            // outer ones can sit tens of points off the drawn border, and cell
+            // rules are inset by their padding. The centre is the one point
+            // that is unambiguously inside this cell.
+            let cx = (xs[c] + xs[c + 1]) * 0.5;
+            if !at_y.iter().any(|h| h.x_min <= cx && h.x_max >= cx) {
+                mask[row][c] = true;
+            }
+        }
+    }
+    mask
+}
+
 fn passes_density_gate(
     cells: &[Vec<String>],
     cell_has_text: &[Vec<bool>],
@@ -3481,13 +3627,25 @@ fn passes_density_gate(
     n_rows: usize,
     n_cols: usize,
     flattened: bool,
+    spanned: &[Vec<bool>],
     dbg: bool,
 ) -> bool {
     let total = n_rows * n_cols;
-    let empty_count = cell_has_text
-        .iter()
-        .flatten()
-        .filter(|filled| !**filled)
+    // A spanned cell only excuses itself when the cell it is merged into
+    // actually holds text. Walk up the run of merged cells to its head: an
+    // empty head means nothing was merged here, just an unruled hole — the
+    // shape a chart's vertical gridlines make, where forgiving the empties
+    // would turn a plot into a 27-column table.
+    let merged_into_text = |r: usize, c: usize| {
+        let mut i = r;
+        while i > 0 && spanned[i][c] {
+            i -= 1;
+        }
+        cell_has_text[i][c]
+    };
+    let empty_count = (0..n_rows)
+        .flat_map(|r| (0..n_cols).map(move |c| (r, c)))
+        .filter(|&(r, c)| !cell_has_text[r][c] && !(spanned[r][c] && merged_into_text(r, c)))
         .count();
     let empty_frac = (empty_count as f32) / (total as f32);
     if empty_frac <= TABLE_MAX_EMPTY_CELL_FRACTION {
@@ -3724,6 +3882,7 @@ fn build_ruled_table(
     // too many spans straddle interior column boundaries (decorative box, not
     // a table).
     let (mut grid, consumed_indices) = assign_cells(lines, &xs, &ys, dbg)?;
+    grid.spanned = rowspan_mask(hs, h_indices, vs, v_indices, &xs, &ys);
 
     // Collapse phantom rows (text-less thin border-strip rects) then phantom
     // columns (text-less narrow border strips). A real table with one phantom
@@ -3757,6 +3916,7 @@ fn build_ruled_table(
         has_text: cell_has_text,
         repl: cells_repl,
         row_alpha_spanner,
+        spanned,
     } = grid;
 
     let flattened_header = flatten_header_band(
@@ -3780,6 +3940,18 @@ fn build_ruled_table(
         dbg,
     );
 
+    // `merge_stacked_header` folds the top `k` rows into one, so realign the
+    // rowspan mask: the new first row is the merged header (never a rowspan
+    // continuation), and every later row keeps its own mask.
+    let spanned = if spanned.len() > n_rows {
+        let dropped = spanned.len() - n_rows;
+        let mut m = vec![vec![false; n_cols]; 1];
+        m.extend(spanned[dropped + 1..].iter().cloned());
+        m
+    } else {
+        spanned
+    };
+
     if !passes_density_gate(
         &cells,
         &cell_has_text,
@@ -3787,6 +3959,7 @@ fn build_ruled_table(
         n_rows,
         n_cols,
         flattened_header.is_some(),
+        &spanned,
         dbg,
     ) {
         return None;
@@ -3877,6 +4050,37 @@ fn dedup_close(v: &mut Vec<f32>, tol: f32) {
 
 /// Find the bucket index `i` such that `boundaries[i] <= val < boundaries[i+1]`.
 /// Returns `None` if `val` is outside the boundaries.
+/// Distribute a multi-column run's words into ruled columns by each word's own
+/// centre, returning `(column, text)` pairs in column order.
+///
+/// This replaces guessing a split point from a character index: with word boxes
+/// the answer is simply which cell each word sits in. Returns `None` when the
+/// run has no verified word geometry, or when every word lands in one column —
+/// in that case the caller's whole-span fallbacks are the honest answer, since
+/// the run only *overlaps* the neighbouring cell (padding, an overhanging
+/// descender) rather than genuinely spanning it.
+fn bucket_words_into_columns(span: &TextItem, xs: &[f32]) -> Option<Vec<(usize, String)>> {
+    let words = verified_words(span)?;
+    let mut out: Vec<(usize, String)> = Vec::new();
+    for w in words {
+        let cx = (w.x + w.width.max(0.0) * 0.5).clamp(xs[0], *xs.last()?);
+        let col = find_bucket(xs, cx)?;
+        match out.last_mut() {
+            Some((c, text)) if *c == col => {
+                text.push(' ');
+                text.push_str(w.text.trim());
+            }
+            _ => out.push((col, w.text.trim().to_string())),
+        }
+    }
+    // Words must not zig-zag back into an earlier column, and the run must
+    // really occupy more than one.
+    if out.len() < 2 || out.windows(2).any(|p| p[1].0 <= p[0].0) {
+        return None;
+    }
+    Some(out)
+}
+
 fn find_bucket(boundaries: &[f32], val: f32) -> Option<usize> {
     if boundaries.len() < 2 || val < boundaries[0] || val > *boundaries.last().unwrap() {
         return None;
