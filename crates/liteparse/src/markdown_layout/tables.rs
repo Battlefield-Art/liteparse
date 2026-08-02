@@ -195,10 +195,7 @@ pub(super) fn split_span_at_gutters(span: &TextItem) -> Vec<SpanPiece<'_>> {
     pieces
 }
 
-fn piece_from_words<'a>(
-    words: &[&'a crate::types::WordBox],
-    span: &'a TextItem,
-) -> SpanPiece<'a> {
+fn piece_from_words<'a>(words: &[&'a crate::types::WordBox], span: &'a TextItem) -> SpanPiece<'a> {
     let x = words.first().map_or(span.x, |w| w.x);
     let end_x = words
         .last()
@@ -1043,7 +1040,8 @@ fn try_detect_table_inferred(
     let Some(body_start) = body_start else {
         bail!("no strong body row in window");
     };
-    let Some(first) = cells_from_raw_items_with_tracks_opt(&lines[body_start], &tracks, allow_two_col)
+    let Some(first) =
+        cells_from_raw_items_with_tracks_opt(&lines[body_start], &tracks, allow_two_col)
     else {
         bail!("body row cells unassignable");
     };
@@ -2961,6 +2959,20 @@ const TABLE_MAX_PAGE_COVERAGE: f32 = 0.95;
 /// most of the table width.
 const RULED_HLINE_MIN_COVERAGE: f32 = 0.5;
 
+/// Minimum fraction of the component's row extent a vertical rule must span to
+/// count as a column boundary — the mirror image of `RULED_HLINE_MIN_COVERAGE`.
+///
+/// Slide decks routinely draw a table as one stroked rect per cell, so a single
+/// decorative highlight box behind a phrase *inside* a cell contributes a pair
+/// of vertical edges that split that column in two for the whole table (doc 200:
+/// a 21.6×9.4pt box at x=336.9 shredded a 210pt-wide `Explanation` column and
+/// took the grid from 4 columns to 6). `collapse_gutter_columns` can't fuse the
+/// sliver back because text centres do land inside it.
+///
+/// Kept well below the horizontal counterpart: a genuine divider that rules only
+/// the header band of an otherwise open table is a real layout, and must survive.
+const RULED_VLINE_MIN_COVERAGE: f32 = 0.2;
+
 /// Extract horizontal and vertical line segments from a page's graphics. Each
 /// `Stroke` becomes one HSeg or VSeg depending on orientation; each stroked
 /// `Rect` contributes its four edges (cell-border rects, table frames).
@@ -3187,6 +3199,10 @@ struct CellGrid {
     /// Travels with the row/column collapses so the density gate forgives the
     /// empties that are actually here, not ones from a discarded row.
     spanned: Vec<Vec<bool>>,
+    /// Fraction of raw spans that cross an interior column boundary. Recorded
+    /// so `build_ruled_table` can tell whether dropping short vertical rules
+    /// actually stopped the grid cutting through text.
+    straddle_frac: f32,
 }
 
 impl CellGrid {
@@ -3198,6 +3214,7 @@ impl CellGrid {
             repl: vec![vec![String::new(); n_cols]; n_rows],
             row_alpha_spanner: vec![false; n_rows],
             spanned: vec![vec![false; n_cols]; n_rows],
+            straddle_frac: 0.0,
         }
     }
 
@@ -3527,6 +3544,7 @@ fn assign_cells(
         }
         return None;
     }
+    grid.straddle_frac = straddle_frac;
 
     Some((grid, consumed_indices))
 }
@@ -3912,6 +3930,50 @@ fn collapse_gutter_columns(xs: &mut Vec<f32>, lines: &[ProjectedLine], dbg: bool
     }
 }
 
+/// Drop vertical rules too short to be column boundaries (see
+/// `RULED_VLINE_MIN_COVERAGE`). Coverage is measured against the row extent the
+/// horizontals describe, since that is the height a real divider has to reach.
+fn filter_short_vlines(
+    hs: &[HSeg],
+    h_indices: &[usize],
+    vs: &[VSeg],
+    v_indices: &[usize],
+) -> Vec<usize> {
+    let y_lo = h_indices.iter().map(|&i| hs[i].y).fold(f32::MAX, f32::min);
+    let y_hi = h_indices.iter().map(|&i| hs[i].y).fold(f32::MIN, f32::max);
+    let extent = (y_hi - y_lo).max(1.0);
+    let kept: Vec<usize> = v_indices
+        .iter()
+        .copied()
+        .filter(|&i| (vs[i].y_max - vs[i].y_min) / extent >= RULED_VLINE_MIN_COVERAGE)
+        .collect();
+    // Two boundaries is one column, which is not a grid; below that the caller
+    // has nothing to refine and keeps the raw set.
+    if kept.len() >= 3 {
+        kept
+    } else {
+        v_indices.to_vec()
+    }
+}
+
+/// Build a ruled table from one grid component.
+///
+/// Runs `build_ruled_table_from` twice when short vertical rules are present:
+/// once on the rules as drawn, once with the stubs filtered out. The unfiltered
+/// build is the gatekeeper — **the filtered result is only ever allowed to
+/// replace a table that would have been produced anyway**. That ordering is
+/// load-bearing, and each of the three cases below was found by a document the
+/// cheaper "just filter first" version broke:
+///   - doc 71 — the filter left a bar chart with one column, so the grid was
+///     rejected and its gridlines were released to be emitted as thematic
+///     breaks instead (MHS 0.98 -> 0.62);
+///   - doc 70 — a pie chart's short callout rules were dropped, turning a grid
+///     the density gate had rejected into a junk 2-column table (NID -0.10);
+///   - ParseBench `FBLB-134215544_page88` — dropping a single 4%-coverage stub
+///     out of 20 rules flipped a rejected component into an 11-column table
+///     that swallowed the whole page (composite 0.66 -> 0.03).
+/// Raising the fallback threshold patched each of these one at a time and kept
+/// finding new ones; requiring the unfiltered build to succeed kills the class.
 fn build_ruled_table(
     hs: &[HSeg],
     vs: &[VSeg],
@@ -3922,8 +3984,73 @@ fn build_ruled_table(
     page_height: f32,
     pass: RuledPass,
 ) -> Option<(TableRun, Vec<usize>)> {
+    let base = build_ruled_table_from(
+        hs,
+        vs,
+        h_indices,
+        v_indices,
+        lines,
+        page_width,
+        page_height,
+        pass,
+    )?;
+    let v_kept = filter_short_vlines(hs, h_indices, vs, v_indices);
+    let strip = |(run, consumed, _straddle)| (run, consumed);
+    if v_kept.len() == v_indices.len() {
+        return Some(strip(base));
+    }
     let dbg = *super::flags::DEBUG_RULED;
-    let mut xs: Vec<f32> = v_indices.iter().map(|&i| vs[i].x).collect();
+    let retry = build_ruled_table_from(
+        hs,
+        vs,
+        h_indices,
+        &v_kept,
+        lines,
+        page_width,
+        page_height,
+        pass,
+    );
+    // Take the refined grid only when dropping the stubs measurably stopped the
+    // boundaries cutting through text. A stub that sits on a *real* column edge
+    // is the common case in dense financial tables — there the straddle census
+    // is unchanged and dropping the rule just loses a column (ParseBench
+    // `corp-q1-2025_page10`: a 2.5pt rule at x=451.25 was the only evidence for
+    // a boundary, and merging that column away cost 0.73 -> 0.33).
+    match retry {
+        Some(r) if r.2 < base.2 - STRADDLE_IMPROVEMENT => {
+            if dbg {
+                eprintln!(
+                    "[ruled]   vline-coverage retry {} -> {} rules, straddle {:.2} -> {:.2}",
+                    v_indices.len(),
+                    v_kept.len(),
+                    base.2,
+                    r.2
+                );
+            }
+            Some(strip(r))
+        }
+        _ => Some(strip(base)),
+    }
+}
+
+/// How much the straddle fraction must fall for the short-vline refinement to
+/// be worth taking. Doc 200's phantom column drops it 0.33 -> 0.03; a stub on a
+/// real column edge leaves it flat.
+const STRADDLE_IMPROVEMENT: f32 = 0.05;
+
+#[allow(clippy::too_many_arguments)]
+fn build_ruled_table_from(
+    hs: &[HSeg],
+    vs: &[VSeg],
+    h_indices: &[usize],
+    v_kept: &[usize],
+    lines: &[ProjectedLine],
+    page_width: f32,
+    page_height: f32,
+    pass: RuledPass,
+) -> Option<(TableRun, Vec<usize>, f32)> {
+    let dbg = *super::flags::DEBUG_RULED;
+    let mut xs: Vec<f32> = v_kept.iter().map(|&i| vs[i].x).collect();
     xs.sort_by(|a, b| a.total_cmp(b));
     // Coarser, mean-centered clustering for column boundaries: cell-border
     // rects contribute paired edges 4-6pt apart that would otherwise become
@@ -4011,7 +4138,8 @@ fn build_ruled_table(
     // too many spans straddle interior column boundaries (decorative box, not
     // a table).
     let (mut grid, consumed_indices) = assign_cells(lines, &xs, &ys, dbg)?;
-    grid.spanned = rowspan_mask(hs, h_indices, vs, v_indices, &xs, &ys);
+    let straddle_frac = grid.straddle_frac;
+    grid.spanned = rowspan_mask(hs, h_indices, vs, v_kept, &xs, &ys);
 
     // Collapse phantom rows (text-less thin border-strip rects) then phantom
     // columns (text-less narrow border strips). A real table with one phantom
@@ -4046,6 +4174,7 @@ fn build_ruled_table(
         repl: cells_repl,
         row_alpha_spanner,
         spanned,
+        straddle_frac: _,
     } = grid;
 
     let flattened_header = flatten_header_band(
@@ -4127,6 +4256,7 @@ fn build_ruled_table(
             },
         },
         consumed_indices,
+        straddle_frac,
     ))
 }
 
@@ -4813,6 +4943,57 @@ mod tests {
         assert!(rule_bands(&g, 792.0).is_empty());
     }
 
+    /// Four full-height dividers plus one short pair from a highlight box drawn
+    /// inside a cell — the doc-200 shape.
+    fn vlines_with_intruder() -> (Vec<HSeg>, Vec<VSeg>) {
+        let hs = (0..5)
+            .map(|r| HSeg {
+                x_min: 0.0,
+                x_max: 300.0,
+                y: r as f32 * 25.0,
+            })
+            .collect();
+        let mut vs: Vec<VSeg> = [0.0, 100.0, 200.0, 300.0]
+            .iter()
+            .map(|&x| VSeg {
+                y_min: 0.0,
+                y_max: 100.0,
+                x,
+            })
+            .collect();
+        vs.push(VSeg {
+            y_min: 40.0,
+            y_max: 49.0,
+            x: 140.0,
+        });
+        vs.push(VSeg {
+            y_min: 40.0,
+            y_max: 49.0,
+            x: 162.0,
+        });
+        (hs, vs)
+    }
+
+    #[test]
+    fn in_cell_highlight_box_does_not_become_a_column() {
+        let (hs, vs) = vlines_with_intruder();
+        let kept = filter_short_vlines(&hs, &[0, 1, 2, 3, 4], &vs, &[0, 1, 2, 3, 4, 5]);
+        assert_eq!(kept, vec![0, 1, 2, 3]);
+    }
+
+    #[test]
+    fn filter_never_leaves_fewer_than_three_columns() {
+        // Only two dividers reach full height; filtering would leave a 1-column
+        // grid, so the raw set survives and the usual gates decide.
+        let (hs, mut vs) = vlines_with_intruder();
+        vs[2].y_min = 40.0;
+        vs[2].y_max = 49.0;
+        vs[3].y_min = 40.0;
+        vs[3].y_max = 49.0;
+        let kept = filter_short_vlines(&hs, &[0, 1, 2, 3, 4], &vs, &[0, 1, 2, 3, 4, 5]);
+        assert_eq!(kept, vec![0, 1, 2, 3, 4, 5]);
+    }
+
     #[test]
     fn rowspan_mask_marks_unruled_cell_boundaries() {
         // Two columns; the boundary at y=20 is ruled only across column 1, so
@@ -4839,7 +5020,14 @@ mod tests {
             y_max: 40.0,
             x: 50.0,
         }];
-        let mask = rowspan_mask(&hs, &[0, 1, 2], &vs, &[0], &[0.0, 50.0, 100.0], &[0.0, 20.0, 40.0]);
+        let mask = rowspan_mask(
+            &hs,
+            &[0, 1, 2],
+            &vs,
+            &[0],
+            &[0.0, 50.0, 100.0],
+            &[0.0, 20.0, 40.0],
+        );
         assert_eq!(mask, vec![vec![false, false], vec![true, false]]);
     }
 
@@ -4870,7 +5058,14 @@ mod tests {
             y_max: 15.0,
             x: 50.0,
         }];
-        let mask = rowspan_mask(&hs, &[0, 1, 2], &vs, &[0], &[0.0, 50.0, 100.0], &[0.0, 20.0, 40.0]);
+        let mask = rowspan_mask(
+            &hs,
+            &[0, 1, 2],
+            &vs,
+            &[0],
+            &[0.0, 50.0, 100.0],
+            &[0.0, 20.0, 40.0],
+        );
         assert!(mask.iter().flatten().all(|m| !*m));
     }
 
