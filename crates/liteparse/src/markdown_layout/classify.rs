@@ -186,8 +186,14 @@ pub fn classify_page_with_filters(
         // override (a decorative frame can span a data table plus surrounding
         // prose; the data region tables cleanly by itself, while the frame
         // would fuse prose into garbage cells).
+        // The leaf must also hold a material share of the run. A leaf with a
+        // handful of the lines — a landscape slide's title band sitting above
+        // the table, which tables "successfully" on its own as a row of
+        // gutter-split title fragments — is not evidence that the per-region
+        // path has this content covered; vetoing on it drops the whole table
+        // and spills its body rows into prose.
         let already_handled = groups.values().any(|idxs| {
-            if idxs.len() < 2 {
+            if idxs.len() < 2 || idxs.len() * 4 < consumed.len() {
                 return false;
             }
             let sub: Vec<ProjectedLine> = idxs.iter().map(|&i| lines[i].clone()).collect();
@@ -497,7 +503,8 @@ fn classify_region(
     // objects are page-coordinate; the detector intersects them against the
     // sub-list's line bboxes anyway.
     let ruled_runs = detect_ruled_tables(lines, &page.graphics, page.page_width, page.page_height);
-    let borderless_runs = precomputed_tables.unwrap_or_else(|| detect_tables(lines));
+    let borderless_runs = precomputed_tables
+        .unwrap_or_else(|| detect_tables(lines));
     let table_runs = merge_table_runs(ruled_runs, borderless_runs);
 
     // Region-wide pre-pass: which line indices carry a lettered/roman marker
