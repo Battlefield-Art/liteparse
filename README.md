@@ -137,6 +137,8 @@ npx skills add run-llama/llamaparse-agent-skills --skill liteparse
 
 Or copy-pasting the [`SKILL.md`](https://github.com/run-llama/llamaparse-agent-skills/blob/main/skills/liteparse/SKILL.md) file to your own skills setup.
 
+See the [Agent Skill guide](https://developers.llamaindex.ai/liteparse/guides/agent-skill/?utm_source=github&utm_medium=liteparse) for requirements and usage patterns.
+
 ## CLI Usage
 
 The CLI is the same across all installations (`npm`, `pip`, `cargo install`).
