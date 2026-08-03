@@ -31,5 +31,6 @@ LiteParse is designed specifically for use cases that require fast, accurate tex
 - [Document complexity](/liteparse/guides/complexity/): Detect scanned, multi-column, and table-heavy pages up front.
 - [Library usage](/liteparse/guides/library-usage/): Use LiteParse from TypeScript or Python code.
 - [Browser usage (WASM)](/liteparse/guides/browser-usage/): Run LiteParse in the browser with zero server dependencies.
+- [Agent skill](/liteparse/guides/agent-skill/): Give Claude Code, Cursor, or Codex the ability to parse documents locally.
 - [CLI reference](/liteparse/cli-reference/): Complete command and option reference.
 - [API reference](/liteparse/api/): Detailed API documentation (rust) for all public types and functions. The same types apply across all language bindings.
