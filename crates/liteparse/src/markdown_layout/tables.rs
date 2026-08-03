@@ -31,6 +31,14 @@ const TABLE_MIN_TRACK_GAP_FLOOR_PT: f32 = 12.0;
 /// anchor the header/body split in ruled-grid collapse.
 const TABLE_ROW_MIN_FILL: f32 = 0.9;
 
+/// Two horizontal rules closer than this bound a heading underline or a boxed
+/// caption, not a table body.
+const RULE_BAND_MIN_HEIGHT_PT: f32 = 10.0;
+
+/// A rule band with fewer lines than this is a rule under a heading or a run of
+/// hyperlink underlines - never a table.
+const RULE_BAND_MIN_LINES: usize = 3;
+
 /// Floor for the sparse-new-row path: a partial-cell line whose bottom-gap
 /// exceeds this fraction qualifies as a real new row (with empty cells at
 /// missing tracks) instead of being treated as a wrap continuation. Below
@@ -45,6 +53,198 @@ const TABLE_ROW_GAP_MULTIPLIER: f32 = 2.5;
 /// Maximum coefficient-of-variation for row spacing within a confident table
 /// (rejecting irregular spacing that's more likely prose or a footer block).
 const TABLE_ROW_SPACING_MAX_CV: f32 = 0.5;
+
+/// Minimum ratio between the smallest "wide" inter-word gap and the largest
+/// ordinary one for a span's internal gaps to read as bimodal - i.e. for the
+/// wide ones to be column gutters rather than stretched justification spaces.
+///
+/// Measured separation is large: real gutters run 3.4–4.4× the in-cell word
+/// gap (7.29 vs 2.13 on a booktabs worksheet header, 7.73 vs 1.76 on a
+/// two-column-label results table), while fully-justified prose - the one
+/// thing that reliably counterfeits column structure - tops out around 1.3×.
+const SPAN_GUTTER_MIN_RATIO: f32 = 2.5;
+
+/// Absolute floor (points) on a gap treated as an in-span column gutter, so
+/// tightly-kerned small text can't manufacture columns out of a 1pt jitter.
+const SPAN_GUTTER_MIN_PT: f32 = 3.0;
+
+/// Floor on the *ordinary* side of the bimodality ratio, as a fraction of the
+/// run's font size. The ratio is meant to compare candidate gutters against
+/// typical word spacing, but the sorted-gap scan takes whatever gap sits below
+/// the jump - and one degenerate sub-point gap (kerning jitter, a run-on
+/// superscript) would make an ordinary 3pt word space clear the ratio and read
+/// as a gutter tier of its own. A word space in `f`pt type is never far below
+/// `0.2 × f`, so nothing smaller may serve as the comparison base.
+const SPAN_GUTTER_MIN_ORDINARY_EM: f32 = 0.2;
+
+/// One horizontal piece of a PDFium text run: the run split at its internal
+/// column gutters. Most runs yield a single piece.
+#[derive(Debug, Clone)]
+pub(super) struct SpanPiece<'a> {
+    pub(super) x: f32,
+    pub(super) end_x: f32,
+    pub(super) text: String,
+    /// The run this piece came from - for bold/font lookups.
+    pub(super) span: &'a TextItem,
+    /// The piece's own word boxes, in reading order, but **only** when they
+    /// were verified to reconstruct `text` exactly. Empty otherwise, so a
+    /// consumer can treat non-empty as "real geometry for every word here".
+    pub(super) words: Vec<&'a crate::types::WordBox>,
+}
+
+/// A run's own word boxes, in reading order, but only when they reconstruct the
+/// run's text exactly. Anything less and the boxes can't be used to slice the
+/// text, because the split points wouldn't correspond to it.
+///
+/// The x-filter matters: projection can append a merged neighbour's word boxes
+/// onto a run without re-slicing the text, making `span.words` a superset.
+pub(super) fn verified_words(span: &TextItem) -> Option<Vec<&crate::types::WordBox>> {
+    let x1 = span.x + span.width.max(0.0);
+    let words: Vec<&crate::types::WordBox> = span
+        .words
+        .iter()
+        .filter(|w| !w.text.trim().is_empty() && w.x >= span.x - 1.0 && w.x <= x1 + 1.0)
+        .collect();
+    if words.is_empty() {
+        return None;
+    }
+    let rebuilt = collapse_whitespace(
+        &words
+            .iter()
+            .map(|w| w.text.trim())
+            .collect::<Vec<_>>()
+            .join(" "),
+    );
+    (rebuilt == collapse_whitespace(span.text.trim())).then_some(words)
+}
+
+/// Split one PDFium run into column pieces at its internal gutters.
+///
+/// PDFium routinely emits a whole table row (several cells) as a single run,
+/// which is the root of the track chicken-and-egg: the detector needs tracks to
+/// split runs, but the runs are where the track evidence lives. Word boxes
+/// break the cycle, because the gutter is plainly visible in the geometry
+/// before any table hypothesis exists.
+///
+/// Detection is *relative to the run itself*, never a constant threshold: sort
+/// the inter-word gaps, find the largest ratio jump, and accept the split only
+/// when that jump clears [`SPAN_GUTTER_MIN_RATIO`]. A fixed gap threshold
+/// cannot work here: the same 4pt gap is a gutter in 6pt type and an ordinary
+/// space in 12pt type.
+///
+/// Returns a single piece covering the whole run when it has no word boxes,
+/// fewer than three words, or no bimodal gap.
+pub(super) fn split_span_at_gutters(span: &TextItem) -> Vec<SpanPiece<'_>> {
+    // Unverified word boxes leave `words` empty, so `whole()` then carries no
+    // word geometry, exactly as the `SpanPiece::words` contract requires.
+    let words: Vec<&crate::types::WordBox> = verified_words(span).unwrap_or_default();
+    let whole = || {
+        vec![SpanPiece {
+            x: span.x,
+            end_x: span.x + span.width.max(0.0),
+            text: collapse_whitespace(span.text.trim()),
+            span,
+            words: words.clone(),
+        }]
+    };
+    // Two words give exactly one gap, which is trivially "the largest": no
+    // ratio to test against, so there is no evidence of bimodality. The piece
+    // still carries its words, so a track-driven split can use them later.
+    if words.len() < 3 {
+        return whole();
+    }
+
+    let gaps: Vec<f32> = words
+        .windows(2)
+        .map(|w| w[1].x - (w[0].x + w[0].width.max(0.0)))
+        .collect();
+    let mut sorted = gaps.clone();
+    sorted.sort_by(f32::total_cmp);
+    // Largest ratio jump between adjacent sorted gaps: the boundary between
+    // "ordinary space" and "gutter", if there is one.
+    let font = span.font_size.unwrap_or(span.height).max(1.0);
+    let lo_floor = font * SPAN_GUTTER_MIN_ORDINARY_EM;
+    let mut cut = None;
+    let mut best_ratio = SPAN_GUTTER_MIN_RATIO;
+    for i in 0..sorted.len() - 1 {
+        let (lo, hi) = (sorted[i], sorted[i + 1]);
+        if hi < SPAN_GUTTER_MIN_PT {
+            continue;
+        }
+        let ratio = hi / lo.max(lo_floor);
+        if ratio >= best_ratio {
+            best_ratio = ratio;
+            cut = Some(hi);
+        }
+    }
+    let Some(threshold) = cut else {
+        return whole();
+    };
+
+    let mut pieces: Vec<SpanPiece<'_>> = Vec::new();
+    let mut current: Vec<&crate::types::WordBox> = vec![words[0]];
+    for (i, gap) in gaps.iter().enumerate() {
+        if *gap >= threshold {
+            pieces.push(piece_from_words(&current, span));
+            current.clear();
+        }
+        current.push(words[i + 1]);
+    }
+    pieces.push(piece_from_words(&current, span));
+    pieces.retain(|p| !p.text.is_empty());
+    if pieces.len() < 2 {
+        return whole();
+    }
+    if *super::flags::DEBUG_GUTTER {
+        eprintln!(
+            "[gutter] thr={:.2} ratio={:.2} {:?}",
+            threshold,
+            best_ratio,
+            pieces.iter().map(|p| p.text.as_str()).collect::<Vec<_>>()
+        );
+    }
+    pieces
+}
+
+fn piece_from_words<'a>(words: &[&'a crate::types::WordBox], span: &'a TextItem) -> SpanPiece<'a> {
+    let x = words.first().map_or(span.x, |w| w.x);
+    let end_x = words
+        .last()
+        .map_or(span.x + span.width.max(0.0), |w| w.x + w.width.max(0.0));
+    SpanPiece {
+        x,
+        end_x,
+        text: collapse_whitespace(
+            &words
+                .iter()
+                .map(|w| w.text.trim())
+                .collect::<Vec<_>>()
+                .join(" "),
+        ),
+        span,
+        words: words.to_vec(),
+    }
+}
+
+/// All column pieces on a line, left to right. This is the tabular view of a
+/// row: what PDFium calls a run is not what the page calls a cell.
+pub(super) fn line_pieces(line: &ProjectedLine) -> Vec<SpanPiece<'_>> {
+    let mut pieces: Vec<SpanPiece<'_>> = line
+        .spans
+        .iter()
+        .filter(|s| !s.text.trim().is_empty())
+        .flat_map(split_span_at_gutters)
+        .collect();
+    pieces.sort_by(|a, b| a.x.total_cmp(&b.x));
+    pieces
+}
+
+/// `line_pieces` for every line up front. The detection scan tries most lines
+/// as a seed and re-reads its neighbours' pieces for each try, so computing
+/// them per call would redo the same splits O(lines × window) times.
+fn compute_line_pieces(lines: &[ProjectedLine]) -> Vec<Vec<SpanPiece<'_>>> {
+    lines.iter().map(line_pieces).collect()
+}
 
 /// One cell within a tabular row: contributing spans aggregated to text and
 /// its leftmost x position, used to align cells across rows into column
@@ -341,29 +541,29 @@ const TABLE_TRACK_INFERENCE_MAX_ROWS: usize = 12;
 /// 13.9pt inter-item gaps). It also surfaces tracks witnessed by even a
 /// single row when other rows in the same table have PDFium-level merged
 /// spans that hide the full column geometry.
-fn infer_tracks_from_raw_items(lines: &[ProjectedLine], start_idx: usize) -> Vec<f32> {
+fn infer_tracks_from_raw_items(
+    lines: &[ProjectedLine],
+    pieces: &[Vec<SpanPiece<'_>>],
+    start_idx: usize,
+) -> Vec<f32> {
     let mut xs: Vec<f32> = Vec::new();
-    let push_row_xs = |xs: &mut Vec<f32>, line: &ProjectedLine| {
-        let row_xs: Vec<f32> = line
-            .spans
-            .iter()
-            .filter(|s| !s.text.trim().is_empty())
-            .map(|s| s.x)
-            .collect();
+    let push_row_xs = |xs: &mut Vec<f32>, idx: usize| {
+        // Piece x's, not span x's: a row PDFium emitted as one merged run
+        // still witnesses its columns through its internal gutters.
         // Skip 0- or 1-item rows — they don't carry column info and can
         // introduce noise from single-cell prose lines.
-        if row_xs.len() >= 2 {
-            xs.extend(row_xs);
+        if pieces[idx].len() >= 2 {
+            xs.extend(pieces[idx].iter().map(|p| p.x));
         }
     };
-    push_row_xs(&mut xs, &lines[start_idx]);
+    push_row_xs(&mut xs, start_idx);
     let mut j = start_idx + 1;
     let mut rows_used = 1;
     while j < lines.len() && rows_used < TABLE_TRACK_INFERENCE_MAX_ROWS {
         if !table_rows_adjacent(&lines[j - 1], &lines[j]) {
             break;
         }
-        push_row_xs(&mut xs, &lines[j]);
+        push_row_xs(&mut xs, j);
         j += 1;
         rows_used += 1;
     }
@@ -419,18 +619,21 @@ fn cells_from_raw_items_with_tracks(
     line: &ProjectedLine,
     tracks: &[f32],
 ) -> Option<Vec<TableCell>> {
-    let mut spans: Vec<&TextItem> = line
-        .spans
-        .iter()
-        .filter(|s| !s.text.trim().is_empty())
-        .collect();
-    spans.sort_by(|a, b| a.x.total_cmp(&b.x));
-    // Require ≥ 2 PDFium spans on the row. A 1-span row spanning multiple
-    // tracks is almost always prose (wrapped paragraph whose x-range
-    // happens to overlap the track region); shredding it at whitespace
-    // anchors corrupts the body text. Real merged-numeric table rows still
-    // have a label span and a values span (≥ 2).
-    if spans.len() < 2 {
+    cells_from_pieces(&line_pieces(line), tracks, false)
+}
+
+/// `allow_single_piece` admits a row holding one piece. Off by default: a
+/// single piece spanning multiple tracks is almost always prose (a wrapped
+/// paragraph whose x-range merely overlaps the track region), and shredding it
+/// at whitespace anchors corrupts the body text. It is only safe where the row
+/// is known to be inside a table already - a rule band whose second column is
+/// blank, where every body row legitimately has one piece.
+fn cells_from_pieces(
+    spans: &[SpanPiece<'_>],
+    tracks: &[f32],
+    allow_single_piece: bool,
+) -> Option<Vec<TableCell>> {
+    if spans.len() < 2 && !(allow_single_piece && spans.len() == 1) {
         return None;
     }
     let tol = TABLE_TRACK_TOLERANCE_PT;
@@ -453,9 +656,9 @@ fn cells_from_raw_items_with_tracks(
         }
         dst.push_str(src);
     };
-    for span in &spans {
+    for span in spans {
         let x0 = span.x;
-        let x1 = span.x + span.width.max(0.0);
+        let x1 = span.end_x;
         let covered: Vec<usize> = tracks
             .iter()
             .enumerate()
@@ -480,13 +683,18 @@ fn cells_from_raw_items_with_tracks(
                 let idx = covered[0];
                 push_text(&mut cells[idx].text, &span.text);
                 cells[idx].end_x = cells[idx].end_x.max(x1);
-                if is_bold_item(span) {
+                if is_bold_item(span.span) {
                     cells[idx].bold = true;
                 }
             }
             _ => {
-                let pieces = split_span_at_anchors(span, &covered, tracks)?;
-                let bold = is_bold_item(span);
+                let anchors: Vec<f32> = covered[1..].iter().map(|&i| tracks[i]).collect();
+                // Real word x's first; the character-index estimate only when
+                // this piece has no verified word geometry to cut on.
+                let pieces = split_words_at_x_anchors(&span.words, &anchors).or_else(|| {
+                    split_text_at_x_anchors(&span.text, span.x, span.end_x - span.x, &anchors)
+                })?;
+                let bold = is_bold_item(span.span);
                 for (idx, piece) in covered.iter().zip(pieces.iter()) {
                     if piece.is_empty() {
                         return None;
@@ -541,6 +749,55 @@ fn is_value_like(text: &str) -> bool {
 /// usable whitespace boundary (e.g. unbroken text like a long hex string).
 /// Pieces may be empty strings — callers that require non-empty pieces must
 /// check.
+/// Split a word sequence into `anchors.len() + 1` pieces using the words' own
+/// x positions: each anchor picks the inter-word boundary whose following word
+/// starts closest to it.
+///
+/// This is the geometric counterpart of [`split_text_at_x_anchors`], which can
+/// only *interpolate* an x from a character index and so assumes every glyph is
+/// the same width - false for any proportional font, and the reason a split can
+/// land one character off (`10 .1%`). Prefer this whenever the piece carries
+/// verified word boxes.
+///
+/// Returns `None` when there are too few words to host every anchor, when two
+/// anchors want the same boundary, or when an anchor's nearest boundary is
+/// further away than the track tolerance - a miss that large means no word
+/// actually starts at this column, so the caller should fall back rather than
+/// cut where the geometry says nothing happens.
+fn split_words_at_x_anchors(
+    words: &[&crate::types::WordBox],
+    anchors: &[f32],
+) -> Option<Vec<String>> {
+    if anchors.is_empty() || words.len() < anchors.len() + 1 {
+        return None;
+    }
+    let mut cuts: Vec<usize> = Vec::with_capacity(anchors.len());
+    for &target in anchors {
+        let (k, dist) = (1..words.len())
+            .filter(|k| !cuts.contains(k))
+            .map(|k| (k, (words[k].x - target).abs()))
+            .min_by(|a, b| a.1.total_cmp(&b.1))?;
+        if dist > TABLE_TRACK_TOLERANCE_PT {
+            return None;
+        }
+        cuts.push(k);
+    }
+    cuts.sort_unstable();
+    let mut pieces: Vec<String> = Vec::with_capacity(cuts.len() + 1);
+    let mut prev = 0usize;
+    for &k in cuts.iter().chain(std::iter::once(&words.len())) {
+        pieces.push(collapse_whitespace(
+            &words[prev..k]
+                .iter()
+                .map(|w| w.text.trim())
+                .collect::<Vec<_>>()
+                .join(" "),
+        ));
+        prev = k;
+    }
+    Some(pieces)
+}
+
 fn split_text_at_x_anchors(
     text: &str,
     x0: f32,
@@ -650,6 +907,12 @@ fn finalize_table_run(
     if header.is_none() && body_rows.len() < TABLE_MIN_ROWS {
         return None;
     }
+    // A header with no body is not a table. Reachable only via the bold-first-row
+    // promotion, which consumes rows[0] - harmless before the two-row relaxation,
+    // but with it rows[0] can be the *only* row.
+    if body_rows.is_empty() {
+        return None;
+    }
 
     if *super::flags::DEBUG_TABLE {
         eprintln!(
@@ -668,11 +931,20 @@ fn finalize_table_run(
     })
 }
 
+/// `allow_two_row` relaxes the two body-length gates below so a header row plus
+/// a *single* data row can form a table. Only ever set by the last-resort second
+/// pass in `detect_tables_impl`, which runs exclusively in regions where the
+/// normal pass found no table at all - see the comment there for why relaxing
+/// these gates globally is unsafe.
 fn try_detect_table_inferred(
     lines: &[ProjectedLine],
+    pieces: &[Vec<SpanPiece<'_>>],
     start_idx: usize,
     floor: usize,
+    allow_two_row: bool,
+    allow_two_col: bool,
 ) -> Option<TableRun> {
+    let min_columns = if allow_two_col { 2 } else { TABLE_MIN_COLUMNS };
     let dbgt = *super::flags::DEBUG_TABLE;
     let seed_txt: String = lines[start_idx]
         .spans
@@ -690,7 +962,7 @@ fn try_detect_table_inferred(
     }
 
     let baseline_cells = split_cells(&lines[start_idx]);
-    let tracks = infer_tracks_from_raw_items(lines, start_idx);
+    let tracks = infer_tracks_from_raw_items(lines, pieces, start_idx);
     if dbgt {
         eprintln!(
             "[tbl-inferred try @{start_idx} \"{:.40}\"] tracks={} baseline={} xs=[{}]",
@@ -704,7 +976,7 @@ fn try_detect_table_inferred(
                 .join(",")
         );
     }
-    if tracks.len() < TABLE_MIN_COLUMNS {
+    if tracks.len() < min_columns {
         bail!("tracks {} < MIN_COLUMNS", tracks.len());
     }
     // Only bother if we'd actually unlock more columns than the default path.
@@ -755,18 +1027,14 @@ fn try_detect_table_inferred(
     // on the header, the run would break at the first unalignable header cell,
     // and the table would fall to the header-seeded path that drops a column.
     let tol = TABLE_TRACK_TOLERANCE_PT;
-    let is_strong_row = |line: &ProjectedLine| -> bool {
-        let spans: Vec<&TextItem> = line
-            .spans
-            .iter()
-            .filter(|s| !s.text.trim().is_empty())
-            .collect();
+    let is_strong_row = |idx: usize| -> bool {
+        let spans = &pieces[idx];
         if spans.len() < tracks.len() {
             return false;
         }
         spans.iter().all(|s| {
             let x0 = s.x;
-            let x1 = s.x + s.width.max(0.0);
+            let x1 = s.end_x;
             tracks
                 .iter()
                 .filter(|&&t| t >= x0 - tol && t <= x1 + tol)
@@ -782,7 +1050,7 @@ fn try_detect_table_inferred(
             if k > start_idx && !table_rows_adjacent(&lines[k - 1], &lines[k]) {
                 break;
             }
-            if is_strong_row(&lines[k]) {
+            if is_strong_row(k) {
                 body_start = Some(k);
                 break;
             }
@@ -793,10 +1061,10 @@ fn try_detect_table_inferred(
     let Some(body_start) = body_start else {
         bail!("no strong body row in window");
     };
-    let Some(first) = cells_from_raw_items_with_tracks(&lines[body_start], &tracks) else {
+    let Some(first) = cells_from_pieces(&pieces[body_start], &tracks, allow_two_col) else {
         bail!("body row cells unassignable");
     };
-    if first.iter().filter(|c| !c.text.is_empty()).count() < TABLE_MIN_COLUMNS {
+    if first.iter().filter(|c| !c.text.is_empty()).count() < min_columns {
         bail!("body populated cells < MIN_COLUMNS");
     }
     let mut rows: Vec<(usize, &ProjectedLine, Vec<TableCell>)> =
@@ -811,7 +1079,7 @@ fn try_detect_table_inferred(
         if !table_rows_adjacent(rows.last().unwrap().1, &lines[j]) {
             break;
         }
-        let Some(cells) = cells_from_raw_items_with_tracks(&lines[j], &tracks) else {
+        let Some(cells) = cells_from_pieces(&pieces[j], &tracks, allow_two_col) else {
             if dbgt {
                 let rt: String = lines[j]
                     .spans
@@ -831,7 +1099,8 @@ fn try_detect_table_inferred(
         rows.push((j, &lines[j], cells));
         j += 1;
     }
-    if rows.len() < TABLE_MIN_ROWS {
+    let min_rows = if allow_two_row { 1 } else { TABLE_MIN_ROWS };
+    if rows.len() < min_rows {
         bail!("rows {} < MIN_ROWS", rows.len());
     }
     // When the body was seeded below `start_idx` (the lead line was a header
@@ -841,7 +1110,7 @@ fn try_detect_table_inferred(
     // header-seeded path of the real table below it. Already-strong seeds
     // (body_start == start_idx) keep the
     // standard MIN_ROWS threshold and are unaffected.
-    if body_start > start_idx && rows.len() < 3 {
+    if body_start > start_idx && rows.len() < 3 && !allow_two_row {
         bail!("advanced body_start but only {} rows", rows.len());
     }
     let cv = row_spacing_cv(&rows);
@@ -852,7 +1121,7 @@ fn try_detect_table_inferred(
     let end = j;
 
     let bold_eligible = rows[0].2.iter().all(|c| c.bold && !c.text.is_empty());
-    finalize_table_run(
+    let run = finalize_table_run(
         lines,
         body_start,
         floor,
@@ -861,7 +1130,63 @@ fn try_detect_table_inferred(
         column_count,
         end,
         bold_eligible,
-    )
+    )?;
+    // Runs that exist *only* because the relaxation fired must clear the extra
+    // content gates. Runs that would have passed the normal floor anyway are
+    // untouched, so this can never reject something the normal pass accepted.
+    if allow_two_row && rows.len() < TABLE_MIN_ROWS && !two_row_run_plausible(lines, &run) {
+        bail!("two-row run failed plausibility gates");
+    }
+    Some(run)
+}
+
+/// Plausibility gates for a header + single-data-row run.
+///
+/// Two rows is the weakest possible structural signal, and there is one thing
+/// that reliably counterfeits it: **fully-justified prose**. Justification
+/// stretches inter-word spaces until they read as column gutters, so any two
+/// consecutive lines of a justified paragraph infer clean tracks and shred into
+/// `| when travelling | to | conflict | zones, | more |`.
+///
+/// Two signals separate the real thing from the counterfeit:
+///
+/// 1. **Isolation.** A real 2-row table is surrounded by whitespace. A prose
+///    pair is mid-paragraph, so its neighbours are table-adjacent lines.
+/// 2. **Header shape.** Header cells are labels: they start with a capital or
+///    a digit and don't trail mid-sentence punctuation. Prose "headers" are
+///    lowercase words, often ending in a comma.
+fn two_row_run_plausible(lines: &[ProjectedLine], run: &TableRun) -> bool {
+    let Block::Table {
+        header: Some(header),
+        ..
+    } = &run.block
+    else {
+        return false;
+    };
+
+    if run.start > 0 && table_rows_adjacent(&lines[run.start - 1], &lines[run.start]) {
+        return false;
+    }
+    if run.end < lines.len() && table_rows_adjacent(&lines[run.end - 1], &lines[run.end]) {
+        return false;
+    }
+
+    let mut non_empty = 0;
+    for cell in header {
+        let t = cell.trim();
+        if t.is_empty() {
+            continue;
+        }
+        non_empty += 1;
+        let first = t.chars().next().unwrap();
+        if !(first.is_uppercase() || first.is_ascii_digit()) {
+            return false;
+        }
+        if t.ends_with(',') || t.ends_with(';') {
+            return false;
+        }
+    }
+    non_empty >= TABLE_MIN_COLUMNS
 }
 
 /// Try to extend a candidate table starting at `start_idx`. On success returns
@@ -1076,7 +1401,35 @@ fn absorb_header_lines(
     let mut j = start_idx;
     while j > floor {
         let cand = j - 1;
-        let cells = split_cells(&lines[cand]);
+        let mut cells = split_cells(&lines[cand]);
+        // PDFium routinely emits a header row's words as one merged text run,
+        // so an 8-column table arrives with a 2-cell header whose second cell
+        // spans seven tracks. `match_track_idx` below can only bind that blob
+        // to a single column, collapsing the whole header band into one cell.
+        // Body rows already get merged-run recovery; headers need it too.
+        //
+        // Prose carries whitespace everywhere, so recovery "succeeds" on a
+        // paragraph sitting above the table just as readily as on a real
+        // header - manufacturing a header out of prose and dragging the
+        // paragraph into the table. Cell count can't separate them (a projected
+        // prose line splits on its own internal gaps), but length can: header
+        // labels are terse, shredded prose is not.
+        //
+        // Restricted to the first candidate (the line directly above the body):
+        // a merged-run header is a single line, whereas letting recovery
+        // track-align line after line lets absorption climb an entire
+        // paragraph, one plausible-looking row at a time.
+        if absorbed.is_empty() && cells.len() < column_count {
+            const HEADER_MAX_CELL_CHARS: usize = 30;
+            let tracks: Vec<f32> = track_ranges.iter().map(|r| r.0).collect();
+            if let Some(recovered) = recover_merged_cell(cells.clone(), &tracks)
+                && recovered
+                    .iter()
+                    .all(|c| c.text.chars().count() <= HEADER_MAX_CELL_CHARS)
+            {
+                cells = recovered;
+            }
+        }
         if dbgt {
             let texts: Vec<&str> = cells.iter().map(|c| c.text.as_str()).collect();
             eprintln!(
@@ -1135,6 +1488,116 @@ pub(super) fn detect_tables(lines: &[ProjectedLine]) -> Vec<TableRun> {
     detect_tables_impl(lines, true)
 }
 
+/// `detect_tables` plus the booktabs rule-band pass: a table drawn as nothing
+/// but a top and bottom hairline has no grid for the ruled detector and, when
+/// it has only two columns, is below `TABLE_MIN_COLUMNS` for the borderless
+/// one. The rules themselves are the missing evidence - see `rule_bands`.
+pub(super) fn detect_tables_banded(
+    lines: &[ProjectedLine],
+    segs: &RuleSegments,
+    page_height: f32,
+) -> Vec<TableRun> {
+    let pieces = compute_line_pieces(lines);
+    let runs = detect_tables_with_pieces(lines, &pieces, true);
+    let bands = rule_bands(segs, page_height);
+    if bands.is_empty() {
+        return runs;
+    }
+    two_col_band_pass(lines, &pieces, runs, &bands)
+}
+
+/// A booktabs rule band: a pair of horizontal rules with nothing ruled between
+/// them, i.e. the top and bottom of a table drawn without a grid.
+///
+/// Requires the two rules to overlap in x (they bound the same block), to sit
+/// far enough apart to hold rows but not so far as to be page furniture, and -
+/// crucially - to have **no vertical rule crossing between them**. A band with
+/// verticals is a real grid, and the ruled detector owns it.
+fn rule_bands(segs: &RuleSegments, page_height: f32) -> Vec<(f32, f32)> {
+    let RuleSegments { hs, raw_vs: vs, .. } = segs;
+    let mut out = Vec::new();
+    for pair in hs.windows(2) {
+        let (top, bot) = (&pair[0], &pair[1]);
+        let sep = bot.y - top.y;
+        if !(RULE_BAND_MIN_HEIGHT_PT..page_height * 0.5).contains(&sep) {
+            continue;
+        }
+        let overlap = (top.x_max.min(bot.x_max) - top.x_min.max(bot.x_min)).max(0.0);
+        let extent = (top.x_max - top.x_min).max(bot.x_max - bot.x_min).max(1.0);
+        if overlap / extent < 0.6 {
+            continue;
+        }
+        if vs
+            .iter()
+            .any(|v| v.y_min < bot.y - 1.0 && v.y_max > top.y + 1.0)
+        {
+            continue;
+        }
+        out.push((top.y, bot.y));
+    }
+    out
+}
+
+/// Last-resort pass for two-column tables enclosed in a rule band.
+///
+/// Modelled on `two_row_second_pass` and gated the same way - only in the index
+/// gaps where the normal pass found nothing, and only for runs that stay inside
+/// the gap. The extra requirement is that the seed line lie inside a band and
+/// that the band hold enough lines to be a table rather than a rule under a
+/// heading or a hyperlink underline.
+fn two_col_band_pass(
+    lines: &[ProjectedLine],
+    pieces: &[Vec<SpanPiece<'_>>],
+    runs: Vec<TableRun>,
+    bands: &[(f32, f32)],
+) -> Vec<TableRun> {
+    let claimed = |a: usize, b: usize| runs.iter().any(|r| r.start < b && a < r.end);
+    let mut extra: Vec<TableRun> = Vec::new();
+    for &(y0, y1) in bands {
+        let inside: Vec<usize> = (0..lines.len())
+            .filter(|&i| {
+                let c = lines[i].bbox.y + lines[i].bbox.height * 0.5;
+                c > y0 && c < y1
+            })
+            .collect();
+        // The band's lines must be a contiguous run of the region and numerous
+        // enough to be a table body rather than a rule under a heading or a
+        // stack of hyperlink underlines.
+        if inside.len() < RULE_BAND_MIN_LINES
+            || inside.last().unwrap() - inside[0] + 1 != inside.len()
+        {
+            continue;
+        }
+        let (bs, be) = (inside[0], inside.last().unwrap() + 1);
+        if claimed(bs, be) {
+            continue;
+        }
+        // The seed must read as a genuine two-cell row, not a wrapped prose
+        // line that happens to sit under a rule.
+        if pieces[bs].len() != 2 {
+            continue;
+        }
+        // Detect against the band's lines alone: a run can then never reach
+        // past the rules that are the whole justification for relaxing
+        // `TABLE_MIN_COLUMNS` here.
+        if let Some(mut run) =
+            try_detect_table_inferred(&lines[bs..be], &pieces[bs..be], 0, 0, false, true)
+        {
+            run.start += bs;
+            run.end += bs;
+            run.body_start += bs;
+            extra.push(run);
+        }
+    }
+    if extra.is_empty() {
+        return runs;
+    }
+    let mut all = runs;
+    all.extend(extra);
+    all.sort_by_key(|r| r.start);
+    all
+}
+
 /// Count borderless table runs for the layout-complexity stats. Excludes
 /// description lists — a label/value pair block reads fine as text, so it
 /// should not flag the page as table-bearing. `GridFallback` runs count:
@@ -1156,7 +1619,8 @@ pub(crate) fn validated_ruled_table_rects(
     page_width: f32,
     page_height: f32,
 ) -> Vec<Rect> {
-    detect_ruled_tables_global(lines, graphics, page_width, page_height)
+    let segs = extract_rule_segments(graphics);
+    detect_ruled_tables_global(lines, &segs, page_width, page_height)
         .into_iter()
         .filter_map(|(_, consumed)| {
             let mut x0 = f32::INFINITY;
@@ -1181,11 +1645,20 @@ pub(crate) fn validated_ruled_table_rects(
 }
 
 fn detect_tables_impl(lines: &[ProjectedLine], include_desc_lists: bool) -> Vec<TableRun> {
+    let pieces = compute_line_pieces(lines);
+    detect_tables_with_pieces(lines, &pieces, include_desc_lists)
+}
+
+fn detect_tables_with_pieces(
+    lines: &[ProjectedLine],
+    pieces: &[Vec<SpanPiece<'_>>],
+    include_desc_lists: bool,
+) -> Vec<TableRun> {
     let mut out = Vec::new();
     let mut i = 0;
     let mut floor = 0;
     while i < lines.len() {
-        if let Some(run) = try_detect_table_inferred(lines, i, floor) {
+        if let Some(run) = try_detect_table_inferred(lines, pieces, i, floor, false, false) {
             floor = run.end;
             i = run.end;
             out.push(run);
@@ -1214,7 +1687,65 @@ fn detect_tables_impl(lines: &[ProjectedLine], include_desc_lists: bool) -> Vec<
             break;
         }
     }
-    merged
+    two_row_second_pass(lines, pieces, merged)
+}
+
+/// Last-resort pass for header + single-data-row tables.
+///
+/// Some real tables are a header row plus exactly one data row. Both length
+/// gates in `try_detect_table_inferred` reject them. Relaxing those gates
+/// *directly* is not safe: a 2-row run forms early, higher up the page, and
+/// consumes the header of the real multi-row table below it.
+///
+/// So instead we keep the normal pass exactly as-is and only retry, with the
+/// relaxation on, inside the index gaps where it found *no* table at all. By
+/// construction a run detected here cannot steal rows from a real table: there
+/// isn't one in the gap. Runs that would spill past the gap end are discarded
+/// for the same reason.
+fn two_row_second_pass(
+    lines: &[ProjectedLine],
+    pieces: &[Vec<SpanPiece<'_>>],
+    runs: Vec<TableRun>,
+) -> Vec<TableRun> {
+    // Gaps between (and around) the runs the normal pass claimed.
+    let mut gaps: Vec<(usize, usize)> = Vec::new();
+    let mut cursor = 0;
+    for r in &runs {
+        if r.start > cursor {
+            gaps.push((cursor, r.start));
+        }
+        cursor = cursor.max(r.end);
+    }
+    if cursor < lines.len() {
+        gaps.push((cursor, lines.len()));
+    }
+
+    let mut extra: Vec<TableRun> = Vec::new();
+    for (gs, ge) in gaps {
+        let mut i = gs;
+        // `floor` starts at the gap start so header absorption can never walk
+        // back into the preceding table run.
+        let mut floor = gs;
+        while i < ge {
+            match try_detect_table_inferred(lines, pieces, i, floor, true, false) {
+                // A run that reaches past the gap is exactly the theft case the
+                // gap restriction exists to prevent.
+                Some(run) if run.end <= ge && run.start >= gs => {
+                    floor = run.end;
+                    i = run.end;
+                    extra.push(run);
+                }
+                _ => i += 1,
+            }
+        }
+    }
+    if extra.is_empty() {
+        return runs;
+    }
+    let mut all = runs;
+    all.extend(extra);
+    all.sort_by_key(|r| r.start);
+    all
 }
 
 // ── Description-list 2-column table detector ──────────────────────────────
@@ -2460,6 +2991,40 @@ const TABLE_MAX_PAGE_COVERAGE: f32 = 0.95;
 /// most of the table width.
 const RULED_HLINE_MIN_COVERAGE: f32 = 0.5;
 
+/// Minimum fraction of the component's row extent a vertical rule must span to
+/// count as a column boundary, the mirror image of `RULED_HLINE_MIN_COVERAGE`.
+///
+/// Slide decks routinely draw a table as one stroked rect per cell, so a single
+/// decorative highlight box behind a phrase *inside* a cell contributes a pair
+/// of vertical edges that split that column in two for the whole table.
+/// `collapse_gutter_columns` can't fuse the sliver back because text centres do
+/// land inside it.
+///
+/// Kept well below the horizontal counterpart: a genuine divider that rules only
+/// the header band of an otherwise open table is a real layout, and must survive.
+const RULED_VLINE_MIN_COVERAGE: f32 = 0.2;
+
+/// H/V rule segments extracted once from a page's graphics and shared by every
+/// table-detection pass on the page. The global ruled pass, the per-region
+/// ruled pass, the leaf-veto re-check, and the rule-band pass all consume the
+/// same segments; extracting per call would redo the work once per region.
+pub(super) struct RuleSegments {
+    /// Horizontal segments, clustered by y.
+    hs: Vec<HSeg>,
+    /// Vertical segments as extracted, before same-x clustering. The component
+    /// splitter needs these: clustering unions y-ranges across gaps.
+    raw_vs: Vec<VSeg>,
+    /// Vertical segments, clustered by x.
+    vs: Vec<VSeg>,
+}
+
+pub(super) fn extract_rule_segments(graphics: &[GraphicPrimitive]) -> RuleSegments {
+    let (hs, raw_vs) = extract_h_v_segments(graphics);
+    let hs = cluster_h_segments(hs);
+    let vs = cluster_v_segments(raw_vs.clone());
+    RuleSegments { hs, raw_vs, vs }
+}
+
 /// Extract horizontal and vertical line segments from a page's graphics. Each
 /// `Stroke` becomes one HSeg or VSeg depending on orientation; each stroked
 /// `Rect` contributes its four edges (cell-border rects, table frames).
@@ -2681,6 +3246,15 @@ struct CellGrid {
     /// Per-row flag: the row contains an alpha-dominant multi-column span (a
     /// group-header label, as opposed to a mostly-digit merged data run).
     row_alpha_spanner: Vec<bool>,
+    /// Per-cell flag: the rules say this cell is vertically merged with the one
+    /// above it, so it is empty by construction. See `count_rowspan_cells`.
+    /// Travels with the row/column collapses so the density gate forgives the
+    /// empties that are actually here, not ones from a discarded row.
+    spanned: Vec<Vec<bool>>,
+    /// Fraction of raw spans that cross an interior column boundary. Recorded
+    /// so `build_ruled_table` can tell whether dropping short vertical rules
+    /// actually stopped the grid cutting through text.
+    straddle_frac: f32,
 }
 
 impl CellGrid {
@@ -2691,6 +3265,8 @@ impl CellGrid {
             has_text: vec![vec![false; n_cols]; n_rows],
             repl: vec![vec![String::new(); n_cols]; n_rows],
             row_alpha_spanner: vec![false; n_rows],
+            spanned: vec![vec![false; n_cols]; n_rows],
+            straddle_frac: 0.0,
         }
     }
 
@@ -2737,6 +3313,7 @@ impl CellGrid {
         self.has_text = filter_by(std::mem::take(&mut self.has_text), keep);
         self.repl = filter_by(std::mem::take(&mut self.repl), keep);
         self.row_alpha_spanner = filter_by(std::mem::take(&mut self.row_alpha_spanner), keep);
+        self.spanned = filter_by(std::mem::take(&mut self.spanned), keep);
     }
 
     /// Keep only columns `c` where `keep[c]`; the per-cell layers filter, the
@@ -2755,6 +3332,10 @@ impl CellGrid {
             .map(|row| filter_by(row, keep))
             .collect();
         self.repl = std::mem::take(&mut self.repl)
+            .into_iter()
+            .map(|row| filter_by(row, keep))
+            .collect();
+        self.spanned = std::mem::take(&mut self.spanned)
             .into_iter()
             .map(|row| filter_by(row, keep))
             .collect();
@@ -2962,7 +3543,18 @@ fn assign_cells(
             // nearest each crossed boundary x (xs[k] is column k's left
             // boundary, which is exactly the split target).
             let covered: Vec<usize> = (c_lo..=c_hi).collect();
-            if let Some(pieces) = split_span_at_anchors(span, &covered, xs) {
+            // Prefer real word geometry: each word lands in the ruled column
+            // its own centre falls in, which is exact. `split_span_at_anchors`
+            // has to guess an x from a character index, so on a proportional
+            // font it can cut a word or two off from the true boundary.
+            if let Some(by_word) = bucket_words_into_columns(span, xs) {
+                for (col, text) in by_word {
+                    grid.push_text(row, col, &text);
+                    if !line.all_bold {
+                        grid.is_bold[row][col] = false;
+                    }
+                }
+            } else if let Some(pieces) = split_span_at_anchors(span, &covered, xs) {
                 for (k, piece) in pieces.iter().enumerate() {
                     grid.push_text(row, c_lo + k, piece);
                     if !line.all_bold {
@@ -3004,6 +3596,7 @@ fn assign_cells(
         }
         return None;
     }
+    grid.straddle_frac = straddle_frac;
 
     Some((grid, consumed_indices))
 }
@@ -3155,7 +3748,11 @@ fn merge_stacked_header(
 }
 
 /// Density gate: a grid that is mostly empty cells is rejected unless it shows
-/// strong table evidence. Three escape hatches keep real tables:
+/// strong table evidence. Cells the rules say are vertically merged into the
+/// cell above (`spanned`) don't count as empty at all - they are empty by
+/// construction, and a rowspan label column ("1. Embodying sustainability
+/// values" beside three competence rows) otherwise reads as a sparse grid and
+/// dies here. Beyond that, three escape hatches keep real tables:
 /// - **col0 spine**: a filled, short-text first column (a label column).
 /// - **long-prose table**: a large (≥5×3) grid with a bold header band covering
 ///   ≥3 columns and a dense (≥70%-fill) inner description column — a
@@ -3169,6 +3766,59 @@ fn merge_stacked_header(
 ///
 /// Returns `true` to keep the table, `false` to reject it.
 ///
+/// Mark the grid cells that are *vertically merged* with the cell above them,
+/// read straight off the rules: a cell whose top boundary carries no horizontal
+/// stroke across its own column is the continuation of a rowspan.
+///
+/// This is the geometric explanation for legitimately-empty cells. Every
+/// interior `ys` boundary exists because *some* horizontal segment sits there,
+/// so a column only scores when that particular rule stops short of it - which
+/// is exactly how a PDF draws a merged cell. A fully-ruled grid scores zero.
+fn rowspan_mask(
+    hs: &[HSeg],
+    h_indices: &[usize],
+    vs: &[VSeg],
+    v_indices: &[usize],
+    xs: &[f32],
+    ys: &[f32],
+) -> Vec<Vec<bool>> {
+    let tol = TABLE_GRID_CLUSTER_PT;
+    let mut mask = vec![vec![false; xs.len() - 1]; ys.len() - 1];
+    for (r, &y) in ys[1..ys.len() - 1].iter().enumerate() {
+        // Row `r + 1` is the one below boundary `ys[r + 1]`.
+        let row = r + 1;
+        // Some vertical rule must run *through* the boundary. That is what
+        // distinguishes "the grid continues, this one cell is merged" from
+        // "the grid ended here" - a page-frame component whose stray rules
+        // cross unruled prose has no vertical continuing past them, and
+        // forgiving its empties would turn body text into a two-column table.
+        let grid_continues = v_indices
+            .iter()
+            .map(|&i| &vs[i])
+            .any(|v| v.y_min <= y - tol && v.y_max >= y + tol);
+        if !grid_continues {
+            continue;
+        }
+        let at_y: Vec<&HSeg> = h_indices
+            .iter()
+            .map(|&i| &hs[i])
+            .filter(|h| (h.y - y).abs() <= tol)
+            .collect();
+        for c in 0..xs.len() - 1 {
+            // Test the column's *centre*, not containment of the whole column:
+            // `xs` comes from clustered and gutter-collapsed boundaries, so the
+            // outer ones can sit tens of points off the drawn border, and cell
+            // rules are inset by their padding. The centre is the one point
+            // that is unambiguously inside this cell.
+            let cx = (xs[c] + xs[c + 1]) * 0.5;
+            if !at_y.iter().any(|h| h.x_min <= cx && h.x_max >= cx) {
+                mask[row][c] = true;
+            }
+        }
+    }
+    mask
+}
+
 fn passes_density_gate(
     cells: &[Vec<String>],
     cell_has_text: &[Vec<bool>],
@@ -3176,13 +3826,25 @@ fn passes_density_gate(
     n_rows: usize,
     n_cols: usize,
     flattened: bool,
+    spanned: &[Vec<bool>],
     dbg: bool,
 ) -> bool {
     let total = n_rows * n_cols;
-    let empty_count = cell_has_text
-        .iter()
-        .flatten()
-        .filter(|filled| !**filled)
+    // A spanned cell only excuses itself when the cell it is merged into
+    // actually holds text. Walk up the run of merged cells to its head: an
+    // empty head means nothing was merged here, just an unruled hole - the
+    // shape a chart's vertical gridlines make, where forgiving the empties
+    // would turn a plot into a 27-column table.
+    let merged_into_text = |r: usize, c: usize| {
+        let mut i = r;
+        while i > 0 && spanned[i][c] {
+            i -= 1;
+        }
+        cell_has_text[i][c]
+    };
+    let empty_count = (0..n_rows)
+        .flat_map(|r| (0..n_cols).map(move |c| (r, c)))
+        .filter(|&(r, c)| !cell_has_text[r][c] && !(spanned[r][c] && merged_into_text(r, c)))
         .count();
     let empty_frac = (empty_count as f32) / (total as f32);
     if empty_frac <= TABLE_MAX_EMPTY_CELL_FRACTION {
@@ -3246,6 +3908,172 @@ fn passes_density_gate(
 /// Build a `TableRun` for one ruled-grid component. Returns `None` if the
 /// resulting grid is too small (< 2 cols or < 2 rows), covers nearly the
 /// whole page (likely the page border), or is mostly empty cells.
+/// Fuse "gutter" column boundaries left behind by paired cell-border edges.
+///
+/// A bordered cell contributes two vertical edges - its own right edge and the
+/// next cell's left edge - separated by the table's inter-cell padding.
+/// `TABLE_COL_BOUNDARY_CLUSTER_PT` fuses the tight pairs (4-6pt), but a
+/// generously padded table puts 15-25pt between them, leaving a sliver column
+/// between every real column. Those slivers double the column count, and
+/// because `split_span_at_anchors` shreds text into them they are *not* empty,
+/// so `collapse_phantom_cols` can't remove them - the grid then fails the
+/// empty-cell gate and a perfectly good table is thrown away.
+///
+/// Width alone can't identify them - plenty of real tables carry a genuinely
+/// narrow column (a `#` or `No.` column beside a wide description). What marks
+/// a sliver is that **no text center ever lands inside it**: text steps over a
+/// gutter, but a narrow real column still holds its own values. So fuse a
+/// column only when it holds no span center *and* is far narrower than the
+/// columns that do hold text. Span centers are read straight off the raw spans,
+/// before `split_span_at_anchors` runs, so shredded fragments can't disguise a
+/// sliver as occupied.
+///
+/// The width guard matters independently: a worksheet's blank answer column is
+/// also centerless, but it is as wide as its neighbours and must survive.
+fn collapse_gutter_columns(xs: &mut Vec<f32>, lines: &[ProjectedLine], dbg: bool) {
+    /// A sliver must be at most this fraction of the median *content-bearing*
+    /// column width. Blank-but-full-width cells (worksheets, forms) sit well
+    /// above it and are preserved.
+    const GUTTER_MAX_WIDTH_FRAC: f32 = 0.5;
+
+    if xs.len() < 4 {
+        return; // fewer than 3 columns: nothing to fuse without destroying the table
+    }
+    let centers: Vec<f32> = lines
+        .iter()
+        .flat_map(|l| l.spans.iter())
+        .filter(|s| !s.text.trim().is_empty())
+        .map(|s| s.x + s.width * 0.5)
+        .collect();
+    let has_center = |lo: f32, hi: f32| centers.iter().any(|&c| c >= lo && c < hi);
+
+    let before = xs.len();
+    while xs.len() > 3 {
+        // Median width of the columns that actually hold text.
+        let mut occupied: Vec<f32> = xs
+            .windows(2)
+            .filter(|w| has_center(w[0], w[1]))
+            .map(|w| w[1] - w[0])
+            .collect();
+        if occupied.is_empty() {
+            break;
+        }
+        occupied.sort_by(|a, b| a.total_cmp(b));
+        let median = occupied[occupied.len() / 2];
+        let max_sliver = median * GUTTER_MAX_WIDTH_FRAC;
+
+        // Narrowest centerless column, if any is slim enough to be a gutter.
+        let victim = xs
+            .windows(2)
+            .enumerate()
+            .filter(|(_, w)| !has_center(w[0], w[1]))
+            .map(|(i, w)| (i, w[1] - w[0]))
+            .filter(|&(_, width)| width < max_sliver)
+            .min_by(|a, b| a.1.total_cmp(&b.1));
+        let Some((i, _)) = victim else { break };
+        xs[i] = (xs[i] + xs[i + 1]) * 0.5;
+        xs.remove(i + 1);
+    }
+    if dbg && xs.len() != before {
+        eprintln!(
+            "[ruled]   gutter-collapse {before} -> {} boundaries",
+            xs.len()
+        );
+    }
+}
+
+/// Drop vertical rules too short to be column boundaries (see
+/// `RULED_VLINE_MIN_COVERAGE`). Coverage is measured against the row extent the
+/// horizontals describe, since that is the height a real divider has to reach.
+fn filter_short_vlines(
+    hs: &[HSeg],
+    h_indices: &[usize],
+    vs: &[VSeg],
+    v_indices: &[usize],
+) -> Vec<usize> {
+    let y_lo = h_indices.iter().map(|&i| hs[i].y).fold(f32::MAX, f32::min);
+    let y_hi = h_indices.iter().map(|&i| hs[i].y).fold(f32::MIN, f32::max);
+    let extent = (y_hi - y_lo).max(1.0);
+    let kept: Vec<usize> = v_indices
+        .iter()
+        .copied()
+        .filter(|&i| (vs[i].y_max - vs[i].y_min) / extent >= RULED_VLINE_MIN_COVERAGE)
+        .collect();
+    // Two boundaries is one column, which is not a grid; below that the caller
+    // has nothing to refine and keeps the raw set.
+    if kept.len() >= 3 {
+        kept
+    } else {
+        v_indices.to_vec()
+    }
+}
+
+/// Widen a boundary list to the extent the *perpendicular* rules imply.
+///
+/// A table drawn with interior dividers but no outer frame gives `xs` that stop
+/// at the first and last vertical rule, so its outermost columns are missing
+/// entirely: every line in them reads as overhang and the component collapses.
+/// The evidence is already on the page: the horizontal rules know how wide the
+/// table is, and the verticals know how tall.
+///
+/// Three guards, all load-bearing:
+///   - **median, not min/max** of the perpendicular rules, so one overshooting
+///     stroke cannot widen the grid;
+///   - **the new outer band must hold text**, the same idiom
+///     `collapse_gutter_columns` uses; otherwise a pen-cap overshoot or a
+///     full-width section rule manufactures an empty outer column;
+///   - **the band must be at least `min_band` wide/tall.** Callers pass the
+///     smallest existing row height for the row axis: verticals routinely
+///     overrun the last horizontal by a few points, and a band shorter than any
+///     real row is that overshoot, not a row. A phantom row here is enough for
+///     the ruled grid to outrank a better borderless table. The column axis
+///     passes only the clustering tolerance, because an unruled *label* column
+///     is both common and legitimately much narrower than the ruled data
+///     columns it sits beside.
+fn extend_to_perpendicular_extent(
+    axis: &mut Vec<f32>,
+    perp_los: &[f32],
+    perp_his: &[f32],
+    min_band: f32,
+    has_content: impl Fn(f32, f32) -> bool,
+) {
+    let min_extension = min_band.max(TABLE_COL_BOUNDARY_CLUSTER_PT);
+    let median = |v: &[f32]| {
+        let mut s = v.to_vec();
+        s.sort_by(f32::total_cmp);
+        s.get(s.len() / 2).copied()
+    };
+    let (Some(lo), Some(hi)) = (median(perp_los), median(perp_his)) else {
+        return;
+    };
+    if axis.is_empty() {
+        return;
+    }
+    let dbg = *super::flags::DEBUG_RULED;
+    if lo < axis[0] - min_extension && has_content(lo, axis[0]) {
+        if dbg {
+            eprintln!("[ruled]   extend lo {:.1} -> {:.1}", axis[0], lo);
+        }
+        axis.insert(0, lo);
+    }
+    let last = axis[axis.len() - 1];
+    if hi > last + min_extension && has_content(last, hi) {
+        if dbg {
+            eprintln!("[ruled]   extend hi {last:.1} -> {hi:.1}");
+        }
+        axis.push(hi);
+    }
+}
+
+/// Build a ruled table from one grid component.
+///
+/// Runs `build_ruled_table_from` twice when short vertical rules are present:
+/// once on the rules as drawn, once with the stubs filtered out. The unfiltered
+/// build is the gatekeeper: **the filtered result is only ever allowed to
+/// replace a table that would have been produced anyway**. Filtering first
+/// instead lets the filter *remove the evidence the gates reject junk on*: a
+/// chart loses the very rules that made it too sparse or too small to pass,
+/// and a rejected component flips into an accepted junk table.
 fn build_ruled_table(
     hs: &[HSeg],
     vs: &[VSeg],
@@ -3256,13 +4084,91 @@ fn build_ruled_table(
     page_height: f32,
     pass: RuledPass,
 ) -> Option<(TableRun, Vec<usize>)> {
+    let base = build_ruled_table_from(
+        hs,
+        vs,
+        h_indices,
+        v_indices,
+        lines,
+        page_width,
+        page_height,
+        pass,
+    )?;
+    let v_kept = filter_short_vlines(hs, h_indices, vs, v_indices);
+    let strip = |(run, consumed, _straddle)| (run, consumed);
+    if v_kept.len() == v_indices.len() {
+        return Some(strip(base));
+    }
     let dbg = *super::flags::DEBUG_RULED;
-    let mut xs: Vec<f32> = v_indices.iter().map(|&i| vs[i].x).collect();
+    let retry = build_ruled_table_from(
+        hs,
+        vs,
+        h_indices,
+        &v_kept,
+        lines,
+        page_width,
+        page_height,
+        pass,
+    );
+    // Take the refined grid only when dropping the stubs measurably stopped the
+    // boundaries cutting through text. A stub that sits on a *real* column edge
+    // is the common case in dense financial tables; there the straddle census
+    // is unchanged, and dropping a rule that was the only evidence for its
+    // boundary just merges a real column away.
+    match retry {
+        Some(r) if r.2 < base.2 - STRADDLE_IMPROVEMENT => {
+            if dbg {
+                eprintln!(
+                    "[ruled]   vline-coverage retry {} -> {} rules, straddle {:.2} -> {:.2}",
+                    v_indices.len(),
+                    v_kept.len(),
+                    base.2,
+                    r.2
+                );
+            }
+            Some(strip(r))
+        }
+        _ => Some(strip(base)),
+    }
+}
+
+/// How much the straddle fraction must fall for the short-vline refinement to
+/// be worth taking. Removing a genuine phantom column drops it by an order of
+/// magnitude; a stub on a real column edge leaves it flat.
+const STRADDLE_IMPROVEMENT: f32 = 0.05;
+
+#[allow(clippy::too_many_arguments)]
+fn build_ruled_table_from(
+    hs: &[HSeg],
+    vs: &[VSeg],
+    h_indices: &[usize],
+    v_kept: &[usize],
+    lines: &[ProjectedLine],
+    page_width: f32,
+    page_height: f32,
+    pass: RuledPass,
+) -> Option<(TableRun, Vec<usize>, f32)> {
+    let dbg = *super::flags::DEBUG_RULED;
+    let mut xs: Vec<f32> = v_kept.iter().map(|&i| vs[i].x).collect();
     xs.sort_by(|a, b| a.total_cmp(b));
+    let spans = || lines.iter().flat_map(|l| l.spans.iter());
+    extend_to_perpendicular_extent(
+        &mut xs,
+        &h_indices.iter().map(|&i| hs[i].x_min).collect::<Vec<_>>(),
+        &h_indices.iter().map(|&i| hs[i].x_max).collect::<Vec<_>>(),
+        0.0,
+        |lo, hi| {
+            spans().filter(|s| !s.text.trim().is_empty()).any(|s| {
+                let c = s.x + s.width * 0.5;
+                c >= lo && c < hi
+            })
+        },
+    );
     // Coarser, mean-centered clustering for column boundaries: cell-border
     // rects contribute paired edges 4-6pt apart that would otherwise become
     // phantom 5pt "columns" the span splitter then shreds text into.
     cluster_boundaries(&mut xs, TABLE_COL_BOUNDARY_CLUSTER_PT);
+    collapse_gutter_columns(&mut xs, lines, dbg);
 
     // Distinct row y-coords (cluster again — multiple H lines may share a y).
     // In the global pass, first drop horizontal rules that span only a small
@@ -3295,6 +4201,22 @@ fn build_ruled_table(
     } else {
         raw_ys(h_indices)
     };
+    let mut ys = ys;
+    let min_row_band = ys.windows(2).map(|w| w[1] - w[0]).fold(f32::MAX, f32::min);
+    extend_to_perpendicular_extent(
+        &mut ys,
+        &v_kept.iter().map(|&i| vs[i].y_min).collect::<Vec<_>>(),
+        &v_kept.iter().map(|&i| vs[i].y_max).collect::<Vec<_>>(),
+        min_row_band,
+        |lo, hi| {
+            spans().filter(|s| !s.text.trim().is_empty()).any(|s| {
+                let c = s.y + s.height * 0.5;
+                c >= lo && c < hi
+            })
+        },
+    );
+    dedup_close(&mut ys, TABLE_GRID_CLUSTER_PT);
+    let ys = ys;
     if dbg {
         eprintln!(
             "[ruled] component: ys={:?} xs={:?} ({} lines in scope)",
@@ -3344,6 +4266,8 @@ fn build_ruled_table(
     // too many spans straddle interior column boundaries (decorative box, not
     // a table).
     let (mut grid, consumed_indices) = assign_cells(lines, &xs, &ys, dbg)?;
+    let straddle_frac = grid.straddle_frac;
+    grid.spanned = rowspan_mask(hs, h_indices, vs, v_kept, &xs, &ys);
 
     // Collapse phantom rows (text-less thin border-strip rects) then phantom
     // columns (text-less narrow border strips). A real table with one phantom
@@ -3377,6 +4301,8 @@ fn build_ruled_table(
         has_text: cell_has_text,
         repl: cells_repl,
         row_alpha_spanner,
+        spanned,
+        straddle_frac: _,
     } = grid;
 
     let flattened_header = flatten_header_band(
@@ -3400,6 +4326,18 @@ fn build_ruled_table(
         dbg,
     );
 
+    // `merge_stacked_header` folds the top `k` rows into one, so realign the
+    // rowspan mask: the new first row is the merged header (never a rowspan
+    // continuation), and every later row keeps its own mask.
+    let spanned = if spanned.len() > n_rows {
+        let dropped = spanned.len() - n_rows;
+        let mut m = vec![vec![false; n_cols]; 1];
+        m.extend(spanned[dropped + 1..].iter().cloned());
+        m
+    } else {
+        spanned
+    };
+
     if !passes_density_gate(
         &cells,
         &cell_has_text,
@@ -3407,6 +4345,7 @@ fn build_ruled_table(
         n_rows,
         n_cols,
         flattened_header.is_some(),
+        &spanned,
         dbg,
     ) {
         return None;
@@ -3445,6 +4384,7 @@ fn build_ruled_table(
             },
         },
         consumed_indices,
+        straddle_frac,
     ))
 }
 
@@ -3497,6 +4437,37 @@ fn dedup_close(v: &mut Vec<f32>, tol: f32) {
 
 /// Find the bucket index `i` such that `boundaries[i] <= val < boundaries[i+1]`.
 /// Returns `None` if `val` is outside the boundaries.
+/// Distribute a multi-column run's words into ruled columns by each word's own
+/// centre, returning `(column, text)` pairs in column order.
+///
+/// This replaces guessing a split point from a character index: with word boxes
+/// the answer is simply which cell each word sits in. Returns `None` when the
+/// run has no verified word geometry, or when every word lands in one column -
+/// in that case the caller's whole-span fallbacks are the honest answer, since
+/// the run only *overlaps* the neighbouring cell (padding, an overhanging
+/// descender) rather than genuinely spanning it.
+fn bucket_words_into_columns(span: &TextItem, xs: &[f32]) -> Option<Vec<(usize, String)>> {
+    let words = verified_words(span)?;
+    let mut out: Vec<(usize, String)> = Vec::new();
+    for w in words {
+        let cx = (w.x + w.width.max(0.0) * 0.5).clamp(xs[0], *xs.last()?);
+        let col = find_bucket(xs, cx)?;
+        match out.last_mut() {
+            Some((c, text)) if *c == col => {
+                text.push(' ');
+                text.push_str(w.text.trim());
+            }
+            _ => out.push((col, w.text.trim().to_string())),
+        }
+    }
+    // Words must not zig-zag back into an earlier column, and the run must
+    // really occupy more than one.
+    if out.len() < 2 || out.windows(2).any(|p| p[1].0 <= p[0].0) {
+        return None;
+    }
+    Some(out)
+}
+
 fn find_bucket(boundaries: &[f32], val: f32) -> Option<usize> {
     if boundaries.len() < 2 || val < boundaries[0] || val > *boundaries.last().unwrap() {
         return None;
@@ -3563,35 +4534,150 @@ pub fn detect_table_rects(
     out
 }
 
+/// One band of a grid component after splitting, with the vertical rules
+/// clipped to the band's own y-range.
+struct GridBand {
+    h_idx: Vec<usize>,
+    v_idx: Vec<usize>,
+    /// A copy of the page's `vs` whose y-extents are clamped to this band, so
+    /// the shared spine rule cannot carry the neighbouring table's height into
+    /// `filter_short_vlines` or `extend_to_perpendicular_extent`.
+    vs: Vec<VSeg>,
+}
+
+/// Split one grid component at row bands that no vertical rule actually spans.
+///
+/// `cluster_v_segments` merges same-x verticals by taking the *union* of their
+/// y-ranges with no gap check, so two tables stacked in one column, each
+/// drawing its own short strokes at the same left edge, fuse into a single
+/// component. Each table is then evaluated with all of the other's rows empty
+/// and dies on `TABLE_MAX_EMPTY_CELL_FRACTION`, and when the two tables have
+/// different layouts their column sets are unioned too, over-segmenting both.
+///
+/// The cut signal is geometric and needs no threshold on emptiness: a band
+/// between consecutive horizontals that **no raw, pre-cluster `VSeg` spans**.
+/// That is strictly stronger than "a big gap", and it distinguishes this from a
+/// rowspan, where the vertical does continue through the boundary.
+fn split_component_at_grid_gaps(
+    hs: &[HSeg],
+    vs: &[VSeg],
+    raw_vs: &[VSeg],
+    h_idx: &[usize],
+    v_idx: &[usize],
+) -> Vec<GridBand> {
+    /// Row pitch below this means the component is decoration, not a table -
+    /// vector-drawn maths glyphs make components with a 3-4pt pitch.
+    const MIN_PITCH_PT: f32 = 8.0;
+    /// A gap must dwarf the component's own row pitch *and* clear an absolute
+    /// floor, so ordinary row-height variation never cuts.
+    const GAP_PITCH_MULT: f32 = 2.5;
+    const GAP_MIN_PT: f32 = 30.0;
+    /// Each side must keep a real table: 3 boundaries is 2 rows, the minimum
+    /// `build_ruled_table` will look at.
+    const MIN_BAND_HLINES: usize = 3;
+
+    let whole = || {
+        vec![GridBand {
+            h_idx: h_idx.to_vec(),
+            v_idx: v_idx.to_vec(),
+            vs: vs.to_vec(),
+        }]
+    };
+    let mut sorted = h_idx.to_vec();
+    sorted.sort_by(|&a, &b| hs[a].y.total_cmp(&hs[b].y));
+    if sorted.len() < MIN_BAND_HLINES * 2 {
+        return whole();
+    }
+    let mut pitches: Vec<f32> = sorted.windows(2).map(|w| hs[w[1]].y - hs[w[0]].y).collect();
+    pitches.sort_by(f32::total_cmp);
+    let pitch = pitches[pitches.len() / 2];
+    if pitch < MIN_PITCH_PT {
+        return whole();
+    }
+    let min_gap = (pitch * GAP_PITCH_MULT).max(GAP_MIN_PT);
+
+    let tol = TABLE_CROSS_TOLERANCE_PT;
+    let mut cuts: Vec<usize> = Vec::new(); // index into `sorted`: cut after this line
+    for (i, w) in sorted.windows(2).enumerate() {
+        let (lo, hi) = (hs[w[0]].y, hs[w[1]].y);
+        if hi - lo < min_gap {
+            continue;
+        }
+        let spanned = raw_vs
+            .iter()
+            .any(|v| v.y_min <= lo + tol && v.y_max >= hi - tol);
+        if !spanned {
+            cuts.push(i + 1);
+        }
+    }
+    if cuts.is_empty() {
+        return whole();
+    }
+
+    let mut bounds = vec![0usize];
+    bounds.extend(cuts);
+    bounds.push(sorted.len());
+    if bounds.windows(2).any(|b| b[1] - b[0] < MIN_BAND_HLINES) {
+        return whole(); // a sliver on one side: the cut is not describing two tables
+    }
+
+    bounds
+        .windows(2)
+        .map(|b| {
+            let band = &sorted[b[0]..b[1]];
+            let y_lo = hs[band[0]].y;
+            let y_hi = hs[band[band.len() - 1]].y;
+            let v_idx: Vec<usize> = v_idx
+                .iter()
+                .copied()
+                .filter(|&i| vs[i].y_max > y_lo + tol && vs[i].y_min < y_hi - tol)
+                .collect();
+            let vs: Vec<VSeg> = vs
+                .iter()
+                .map(|v| VSeg {
+                    x: v.x,
+                    y_min: v.y_min.max(y_lo),
+                    y_max: v.y_max.min(y_hi),
+                })
+                .collect();
+            GridBand {
+                h_idx: band.to_vec(),
+                v_idx,
+                vs,
+            }
+        })
+        .collect()
+}
+
 /// Detect ruled-grid tables on a page from its vector graphics. Returns runs
 /// in document order (sorted by `start`).
 fn detect_ruled_tables_impl(
     lines: &[ProjectedLine],
-    graphics: &[GraphicPrimitive],
+    segs: &RuleSegments,
     page_width: f32,
     page_height: f32,
     pass: RuledPass,
 ) -> Vec<(TableRun, Vec<usize>)> {
-    let (hs, vs) = extract_h_v_segments(graphics);
-    let hs = cluster_h_segments(hs);
-    let vs = cluster_v_segments(vs);
+    let RuleSegments { hs, raw_vs, vs } = segs;
     if hs.len() < 2 || vs.len() < 2 {
         return Vec::new();
     }
-    let components = find_grid_components(&hs, &vs);
+    let components = find_grid_components(hs, vs);
     let mut out = Vec::new();
     for (h_idx, v_idx) in components {
-        if let Some(run) = build_ruled_table(
-            &hs,
-            &vs,
-            &h_idx,
-            &v_idx,
-            lines,
-            page_width,
-            page_height,
-            pass,
-        ) {
-            out.push(run);
+        for band in split_component_at_grid_gaps(hs, vs, raw_vs, &h_idx, &v_idx) {
+            if let Some(run) = build_ruled_table(
+                hs,
+                &band.vs,
+                &band.h_idx,
+                &band.v_idx,
+                lines,
+                page_width,
+                page_height,
+                pass,
+            ) {
+                out.push(run);
+            }
         }
     }
     out.sort_by_key(|(r, _)| r.start);
@@ -3602,20 +4688,14 @@ fn detect_ruled_tables_impl(
 /// global pass needs.
 pub(super) fn detect_ruled_tables(
     lines: &[ProjectedLine],
-    graphics: &[GraphicPrimitive],
+    segs: &RuleSegments,
     page_width: f32,
     page_height: f32,
 ) -> Vec<TableRun> {
-    detect_ruled_tables_impl(
-        lines,
-        graphics,
-        page_width,
-        page_height,
-        RuledPass::PerRegion,
-    )
-    .into_iter()
-    .map(|(r, _)| r)
-    .collect()
+    detect_ruled_tables_impl(lines, segs, page_width, page_height, RuledPass::PerRegion)
+        .into_iter()
+        .map(|(r, _)| r)
+        .collect()
 }
 
 /// Page-level ruled-table detection over *all* lines. A table whose rows
@@ -3625,11 +4705,11 @@ pub(super) fn detect_ruled_tables(
 /// consumed so the caller can pull them out of the region pipeline.
 pub(super) fn detect_ruled_tables_global(
     lines: &[ProjectedLine],
-    graphics: &[GraphicPrimitive],
+    segs: &RuleSegments,
     page_width: f32,
     page_height: f32,
 ) -> Vec<(TableRun, Vec<usize>)> {
-    detect_ruled_tables_impl(lines, graphics, page_width, page_height, RuledPass::Global)
+    detect_ruled_tables_impl(lines, segs, page_width, page_height, RuledPass::Global)
 }
 
 /// Count filled (non-empty) cells in a TableRun. GridFallback returns 0 so
@@ -3704,7 +4784,119 @@ pub(super) fn merge_table_runs(
         }
     }
     kept.sort_by_key(|r| r.start);
+    for run in &mut kept {
+        if let Block::Table { rows, .. } = &mut run.block {
+            merge_continuation_rows(rows);
+        }
+    }
     kept
+}
+
+/// Fold soft-wrapped cell continuations back into the row they belong to.
+///
+/// A table cell holding a sentence wraps across several projected lines, and
+/// every one of those lines becomes its own grid row:
+///
+/// ```text
+/// | Knowledge |  | ● To understand the meaning of reducing, reusing and recycling |
+/// |           |  | and how they connect ● To understand the importance of the 3 Rs |
+/// ```
+///
+/// As geometry this is unsolvable: the gap between a wrapped line and a genuine
+/// next row is the same gap. But once the grid exists it is tractable from the
+/// text alone.
+///
+/// A row is a continuation of its predecessor when all of these hold:
+///
+/// - it has the same width and an **empty first cell** (the row label lives on
+///   the first line of the row and is never repeated);
+/// - its filled columns are a **subset** of the predecessor's filled columns:
+///   a continuation can only extend cells that already have text;
+/// - it carries **no value-like cell**; numbers don't soft-wrap, so a
+///   blank-label row holding one is a real data row (typically a `Total`);
+/// - at least one extended cell reads as a soft wrap rather than a fresh
+///   sentence after a completed one.
+fn merge_continuation_rows(rows: &mut Vec<Vec<String>>) {
+    if rows.len() < 2 {
+        return;
+    }
+    // The whole rule keys off "empty first cell", which only means "wrapped
+    // line" when the first column is a *label* column. Plenty of tables just
+    // have a sparse first column: a timetable whose `Notes` column is blank on
+    // every run, a size chart, a hierarchical header. There, every row looks
+    // like a continuation and the table collapses into a single row. Requiring
+    // the first column to be populated in at least half the rows separates the
+    // two.
+    let first_col_filled = rows
+        .iter()
+        .filter(|r| r.first().is_some_and(|c| !c.trim().is_empty()))
+        .count();
+    if first_col_filled * 2 < rows.len() {
+        return;
+    }
+    let mut out: Vec<Vec<String>> = Vec::with_capacity(rows.len());
+    for row in rows.drain(..) {
+        if let Some(prev) = out.last_mut() {
+            if is_continuation_row(prev, &row) {
+                for (i, cell) in row.iter().enumerate() {
+                    let t = cell.trim();
+                    if t.is_empty() {
+                        continue;
+                    }
+                    // `prev[i]` is non-empty for every filled column of `row`;
+                    // that is the subset rule `is_continuation_row` enforces.
+                    prev[i].push(' ');
+                    prev[i].push_str(t);
+                }
+                continue;
+            }
+        }
+        out.push(row);
+    }
+    *rows = out;
+}
+
+fn is_continuation_row(prev: &[String], cur: &[String]) -> bool {
+    if cur.len() != prev.len() || cur.len() < 2 {
+        return false;
+    }
+    // The row label is never repeated on a wrapped line.
+    if !cur[0].trim().is_empty() || prev[0].trim().is_empty() {
+        return false;
+    }
+    let filled: Vec<usize> = (0..cur.len())
+        .filter(|&i| !cur[i].trim().is_empty())
+        .collect();
+    if filled.is_empty() {
+        return false;
+    }
+    // A continuation extends existing text; it cannot introduce a new column.
+    if filled.iter().any(|&i| prev[i].trim().is_empty()) {
+        return false;
+    }
+    // Numbers never soft-wrap. A blank-label row carrying any value-like cell is
+    // a real data row - most often a `Total` line, whose label column is blank
+    // precisely because it isn't the row's own label. Vetoing on *any* value
+    // (not all of them) is what separates it from a genuine wrap, since such
+    // rows pair a short summary word with the figures.
+    if filled.iter().any(|&i| is_value_like(cur[i].trim())) {
+        return false;
+    }
+    filled
+        .iter()
+        .any(|&i| cell_continues(prev[i].trim_end(), cur[i].trim_start()))
+}
+
+/// Whether `cur` reads as the tail of `prev` rather than a new statement. The
+/// only shape we reject is a fresh capitalised sentence following a cell that
+/// already closed with terminal punctuation - that is a sub-row, not a wrap.
+fn cell_continues(prev: &str, cur: &str) -> bool {
+    let starts_new_sentence = cur
+        .chars()
+        .find(|c| c.is_alphabetic())
+        .is_some_and(|c| c.is_uppercase());
+    let prev_closed = prev.ends_with(['.', '!', '?']);
+    !(starts_new_sentence && prev_closed)
 }
 
 /// Escape `|` and `\n` inside a markdown table cell so the pipe-table grammar
@@ -3721,6 +4913,229 @@ mod tests {
     use super::super::test_helpers::{line, line_with_spans, rect_borders, stroke};
     use super::*;
 
+    /// One PDFium run whose words sit at the given (x, width) positions.
+    fn run_with_words(words: &[(&str, f32, f32)]) -> TextItem {
+        let x = words[0].1;
+        let last = words[words.len() - 1];
+        TextItem {
+            text: words
+                .iter()
+                .map(|(t, _, _)| *t)
+                .collect::<Vec<_>>()
+                .join(" "),
+            x,
+            width: last.1 + last.2 - x,
+            height: 10.0,
+            font_size: Some(10.0),
+            words: words
+                .iter()
+                .map(|(t, wx, ww)| crate::types::WordBox {
+                    text: (*t).into(),
+                    x: *wx,
+                    y: 0.0,
+                    width: *ww,
+                    height: 10.0,
+                })
+                .collect(),
+            ..Default::default()
+        }
+    }
+
+    fn piece_texts(span: &TextItem) -> Vec<String> {
+        split_span_at_gutters(span)
+            .into_iter()
+            .map(|p| p.text)
+            .collect()
+    }
+
+    #[test]
+    fn merged_run_splits_at_its_column_gutters() {
+        // doc 190's header: PDFium emits eight cells as one run. In-cell word
+        // gaps are 1.76pt; the gutters are 7.7–12.2pt.
+        let span = run_with_words(&[
+            ("Merge", 172.5, 18.3),
+            ("Method", 192.5, 21.9),
+            ("H6", 226.6, 8.6),
+            ("(Avg.)", 237.0, 18.1),
+            ("ARC", 263.5, 14.5),
+        ]);
+        assert_eq!(piece_texts(&span), ["Merge Method", "H6 (Avg.)", "ARC"]);
+    }
+
+    #[test]
+    fn justified_prose_does_not_split() {
+        // Justification stretches spaces to 3.4pt against a 2.73pt norm - a
+        // 1.25× jump, far under the bimodality bar. This is the counterfeit the
+        // ratio test exists to reject.
+        let span = run_with_words(&[
+            ("may", 306.1, 19.0),
+            ("not", 327.8, 14.1),
+            ("be", 344.6, 10.4),
+            ("as", 357.8, 9.2),
+            ("crucial.", 369.7, 32.7),
+            ("Thus,", 405.8, 24.8),
+            ("we", 433.3, 12.8),
+        ]);
+        assert_eq!(piece_texts(&span).len(), 1);
+    }
+
+    #[test]
+    fn run_without_word_boxes_stays_whole() {
+        let mut span = run_with_words(&[("A", 0.0, 5.0), ("B", 20.0, 5.0), ("C", 26.0, 5.0)]);
+        span.words.clear();
+        assert_eq!(piece_texts(&span), ["A B C"]);
+    }
+
+    #[test]
+    fn kerning_outlier_gap_does_not_fake_bimodality() {
+        // One degenerate 0.1pt gap beside ordinary ~3.4pt word spaces. The
+        // raw ratio between them is huge, but 3.4pt in 10pt type is a word
+        // space, not a gutter tier; the font-relative floor must reject it.
+        let span = run_with_words(&[
+            ("wide", 100.0, 20.0),
+            ("gap", 120.1, 15.0),
+            ("then", 138.5, 18.0),
+            ("normal", 159.9, 25.0),
+        ]);
+        assert_eq!(piece_texts(&span).len(), 1);
+    }
+
+    #[test]
+    fn two_word_run_has_no_bimodality_to_measure() {
+        // One gap is trivially the largest; there is nothing to compare it to.
+        let span = run_with_words(&[("Added", 60.3, 24.1), ("Relative", 118.0, 31.1)]);
+        assert_eq!(piece_texts(&span), ["Added Relative"]);
+    }
+
+    fn rows(v: &[&[&str]]) -> Vec<Vec<String>> {
+        v.iter()
+            .map(|r| r.iter().map(|s| s.to_string()).collect())
+            .collect()
+    }
+
+    #[test]
+    fn wrapped_cell_lines_fold_into_their_row() {
+        let mut r = rows(&[
+            &[
+                "Knowledge",
+                "● To understand the meaning of reducing and recycling",
+            ],
+            &["", "and how they connect ● To be familiar with the 7 Rs"],
+            &["Skills", "● To implement waste management into daily"],
+            &["", "life ● To promote reducing before recycling"],
+        ]);
+        merge_continuation_rows(&mut r);
+        assert_eq!(r.len(), 2);
+        assert_eq!(
+            r[0][1],
+            "● To understand the meaning of reducing and recycling and how they connect ● To be familiar with the 7 Rs"
+        );
+        assert_eq!(r[1][0], "Skills");
+    }
+
+    #[test]
+    fn totals_row_with_blank_label_is_not_a_continuation() {
+        // Regression: doc 45/47. A `Total` line legitimately has an empty label
+        // column; folding it into the last data row destroys both rows.
+        let mut r = rows(&[
+            &[
+                "7",
+                "Traditional and Modern Mental Health Organization",
+                "15",
+            ],
+            &["", "Total", "27,926"],
+        ]);
+        merge_continuation_rows(&mut r);
+        assert_eq!(r.len(), 2);
+        assert_eq!(r[1][1], "Total");
+    }
+
+    #[test]
+    fn sparse_first_column_disables_continuation_merging() {
+        // Regression: a timetable whose `Notes` column is blank on every run.
+        // Every row looks like a continuation, and merging collapses the whole
+        // table into one row (0.859 -> 0.006 GriTS on ParseBench).
+        let mut r = rows(&[
+            &["", "8:24", "8:28", "8:41"],
+            &["", "8:29", "8:33", "8:46"],
+            &["", "8:33", "8:37", "8:50"],
+            &["", "8:38", "8:42", "8:55"],
+        ]);
+        merge_continuation_rows(&mut r);
+        assert_eq!(r.len(), 4);
+    }
+
+    #[test]
+    fn continuation_may_not_introduce_a_new_column() {
+        let mut r = rows(&[&["Label", "some text", ""], &["", "more text", "brand new"]]);
+        merge_continuation_rows(&mut r);
+        assert_eq!(r.len(), 2, "col 2 was empty above, so this is a real row");
+    }
+
+    #[test]
+    fn fresh_sentence_after_closed_cell_is_not_a_continuation() {
+        let mut r = rows(&[
+            &["Label", "A complete thought ending here."],
+            &["", "Another separate statement entirely."],
+        ]);
+        merge_continuation_rows(&mut r);
+        assert_eq!(r.len(), 2);
+    }
+
+    #[test]
+    fn gutter_columns_fused_but_narrow_real_column_kept() {
+        // Padded cell borders: real columns 40..140, 160..260, 280..380 with
+        // 20pt gutters between them. Text sits inside the real columns only.
+        let rows = [
+            line_with_spans(
+                &[("alpha", 45.0), ("beta", 165.0), ("gamma", 285.0)],
+                100.0,
+                10.0,
+            ),
+            line_with_spans(
+                &[("delta", 45.0), ("eps", 165.0), ("zeta", 285.0)],
+                120.0,
+                10.0,
+            ),
+        ];
+        let mut xs = vec![40.0, 140.0, 160.0, 260.0, 280.0, 380.0];
+        collapse_gutter_columns(&mut xs, &rows, false);
+        assert_eq!(xs.len(), 4, "two 20pt gutters should fuse: {xs:?}");
+
+        // A genuinely narrow but *occupied* column must survive, even though it
+        // is the same width as the gutters above.
+        let rows = [
+            line_with_spans(
+                &[("1", 45.0), ("desc", 65.0), ("more text", 205.0)],
+                100.0,
+                10.0,
+            ),
+            line_with_spans(
+                &[("2", 45.0), ("desc two", 65.0), ("text here", 205.0)],
+                120.0,
+                10.0,
+            ),
+        ];
+        let mut xs = vec![40.0, 60.0, 200.0, 380.0];
+        let before = xs.clone();
+        collapse_gutter_columns(&mut xs, &rows, false);
+        assert_eq!(xs, before, "occupied narrow column must not fuse");
+    }
+
+    #[test]
+    fn blank_worksheet_column_survives_gutter_collapse() {
+        // A worksheet's empty answer column is centerless like a gutter but is
+        // full width, so the width guard must keep it.
+        let rows = [
+            line_with_spans(&[("K+", 45.0)], 100.0, 10.0),
+            line_with_spans(&[("Na+", 45.0)], 120.0, 10.0),
+        ];
+        let mut xs = vec![40.0, 240.0, 440.0, 640.0];
+        let before = xs.clone();
+        collapse_gutter_columns(&mut xs, &rows, false);
+        assert_eq!(xs, before, "wide blank columns must not fuse: {xs:?}");
+    }
+
     #[test]
     fn split_cells_splits_on_wide_gaps() {
         let l = line_with_spans(&[("A", 50.0), ("B", 150.0), ("C", 250.0)], 100.0, 10.0);
@@ -3729,6 +5144,226 @@ mod tests {
         assert_eq!(cells[0].text, "A");
         assert_eq!(cells[1].text, "B");
         assert_eq!(cells[2].text, "C");
+    }
+
+    fn hairline(y: f32, x: f32, w: f32) -> GraphicPrimitive {
+        GraphicPrimitive::Rect {
+            bbox: Rect {
+                x,
+                y,
+                width: w,
+                height: 0.8,
+            },
+            stroke: Some("#000".to_string()),
+            fill: None,
+        }
+    }
+
+    #[test]
+    fn booktabs_rule_pair_is_a_band() {
+        // doc 165: the whole table is two hairlines 98pt apart, no verticals.
+        let g = vec![hairline(139.5, 56.7, 225.9), hairline(237.4, 56.7, 225.9)];
+        assert_eq!(
+            rule_bands(&extract_rule_segments(&g), 792.0),
+            [(139.5, 237.4)]
+        );
+    }
+
+    #[test]
+    fn ruled_grid_is_not_a_band() {
+        // Same rules, but a vertical runs between them: this is a real grid and
+        // the ruled detector owns it. Relaxing TABLE_MIN_COLUMNS here would be
+        // a second, worse opinion about the same table.
+        let mut g = vec![hairline(139.5, 56.7, 225.9), hairline(237.4, 56.7, 225.9)];
+        g.push(GraphicPrimitive::Rect {
+            bbox: Rect {
+                x: 150.0,
+                y: 139.5,
+                width: 0.8,
+                height: 97.9,
+            },
+            stroke: Some("#000".to_string()),
+            fill: None,
+        });
+        assert!(rule_bands(&extract_rule_segments(&g), 792.0).is_empty());
+    }
+
+    #[test]
+    fn heading_underline_pair_is_not_a_band() {
+        // Two rules 6pt apart bound a heading underline, not a table body.
+        let g = vec![hairline(100.0, 56.7, 225.9), hairline(106.0, 56.7, 225.9)];
+        assert!(rule_bands(&extract_rule_segments(&g), 792.0).is_empty());
+    }
+
+    /// Four full-height dividers plus one short pair from a highlight box drawn
+    /// inside a cell - the doc-200 shape.
+    fn vlines_with_intruder() -> (Vec<HSeg>, Vec<VSeg>) {
+        let hs = (0..5)
+            .map(|r| HSeg {
+                x_min: 0.0,
+                x_max: 300.0,
+                y: r as f32 * 25.0,
+            })
+            .collect();
+        let mut vs: Vec<VSeg> = [0.0, 100.0, 200.0, 300.0]
+            .iter()
+            .map(|&x| VSeg {
+                y_min: 0.0,
+                y_max: 100.0,
+                x,
+            })
+            .collect();
+        vs.push(VSeg {
+            y_min: 40.0,
+            y_max: 49.0,
+            x: 140.0,
+        });
+        vs.push(VSeg {
+            y_min: 40.0,
+            y_max: 49.0,
+            x: 162.0,
+        });
+        (hs, vs)
+    }
+
+    #[test]
+    fn in_cell_highlight_box_does_not_become_a_column() {
+        let (hs, vs) = vlines_with_intruder();
+        let kept = filter_short_vlines(&hs, &[0, 1, 2, 3, 4], &vs, &[0, 1, 2, 3, 4, 5]);
+        assert_eq!(kept, vec![0, 1, 2, 3]);
+    }
+
+    #[test]
+    fn filter_never_leaves_fewer_than_three_columns() {
+        // Only two dividers reach full height; filtering would leave a 1-column
+        // grid, so the raw set survives and the usual gates decide.
+        let (hs, mut vs) = vlines_with_intruder();
+        vs[2].y_min = 40.0;
+        vs[2].y_max = 49.0;
+        vs[3].y_min = 40.0;
+        vs[3].y_max = 49.0;
+        let kept = filter_short_vlines(&hs, &[0, 1, 2, 3, 4], &vs, &[0, 1, 2, 3, 4, 5]);
+        assert_eq!(kept, vec![0, 1, 2, 3, 4, 5]);
+    }
+
+    #[test]
+    fn unruled_outer_column_is_recovered_from_the_horizontals() {
+        // Interior dividers at 124/383/652; the horizontals say the table runs
+        // 30..930, so the label column and the last data column are missing.
+        let mut xs = vec![123.8, 382.9, 652.1];
+        extend_to_perpendicular_extent(
+            &mut xs,
+            &[29.7, 29.7, 29.8],
+            &[930.3, 930.3, 930.2],
+            0.0,
+            |_, _| true,
+        );
+        assert_eq!(xs, vec![29.7, 123.8, 382.9, 652.1, 930.3]);
+    }
+
+    #[test]
+    fn outer_band_shorter_than_any_row_is_rule_overshoot() {
+        // Verticals overrun the last horizontal by 15.5pt on 26pt rows - a tail,
+        // not a row.
+        let mut ys = vec![181.4, 207.8, 234.2];
+        extend_to_perpendicular_extent(&mut ys, &[181.4], &[249.7], 26.4, |_, _| true);
+        assert_eq!(ys, vec![181.4, 207.8, 234.2]);
+    }
+
+    #[test]
+    fn empty_outer_band_is_not_a_column() {
+        let mut xs = vec![123.8, 382.9, 652.1];
+        extend_to_perpendicular_extent(&mut xs, &[29.7], &[930.3], 0.0, |_, _| false);
+        assert_eq!(xs, vec![123.8, 382.9, 652.1]);
+    }
+
+    #[test]
+    fn one_overshooting_rule_does_not_widen_the_grid() {
+        // Median, not min: a single stroke reaching to 29.7 is noise.
+        let mut xs = vec![123.8, 382.9, 652.1];
+        extend_to_perpendicular_extent(
+            &mut xs,
+            &[29.7, 124.0, 123.9],
+            &[652.0, 652.2, 930.3],
+            0.0,
+            |_, _| true,
+        );
+        assert_eq!(xs, vec![123.8, 382.9, 652.1]);
+    }
+
+    #[test]
+    fn rowspan_mask_marks_unruled_cell_boundaries() {
+        // Two columns; the boundary at y=20 is ruled only across column 1, so
+        // column 0's cell there is merged with the one above it.
+        let hs = vec![
+            HSeg {
+                x_min: 0.0,
+                x_max: 100.0,
+                y: 0.0,
+            },
+            HSeg {
+                x_min: 50.0,
+                x_max: 100.0,
+                y: 20.0,
+            },
+            HSeg {
+                x_min: 0.0,
+                x_max: 100.0,
+                y: 40.0,
+            },
+        ];
+        let vs = vec![VSeg {
+            y_min: 0.0,
+            y_max: 40.0,
+            x: 50.0,
+        }];
+        let mask = rowspan_mask(
+            &hs,
+            &[0, 1, 2],
+            &vs,
+            &[0],
+            &[0.0, 50.0, 100.0],
+            &[0.0, 20.0, 40.0],
+        );
+        assert_eq!(mask, vec![vec![false, false], vec![true, false]]);
+    }
+
+    #[test]
+    fn rowspan_mask_ignores_boundary_where_grid_ends() {
+        // No vertical crosses y=20, so the grid simply stops there - nothing is
+        // merged, and forgiving these empties would let a page frame shred
+        // prose into columns.
+        let hs = vec![
+            HSeg {
+                x_min: 0.0,
+                x_max: 10.0,
+                y: 0.0,
+            },
+            HSeg {
+                x_min: 0.0,
+                x_max: 10.0,
+                y: 20.0,
+            },
+            HSeg {
+                x_min: 0.0,
+                x_max: 10.0,
+                y: 40.0,
+            },
+        ];
+        let vs = vec![VSeg {
+            y_min: 0.0,
+            y_max: 15.0,
+            x: 50.0,
+        }];
+        let mask = rowspan_mask(
+            &hs,
+            &[0, 1, 2],
+            &vs,
+            &[0],
+            &[0.0, 50.0, 100.0],
+            &[0.0, 20.0, 40.0],
+        );
+        assert!(mask.iter().flatten().all(|m| !*m));
     }
 
     #[test]
@@ -3932,7 +5567,7 @@ mod tests {
             line("d", 190.0, 155.0, 10.0, 10.0), // row 1, col 1
         ];
 
-        let runs = detect_ruled_tables(&lines, &graphics, 612.0, 792.0);
+        let runs = detect_ruled_tables(&lines, &extract_rule_segments(&graphics), 612.0, 792.0);
         assert_eq!(runs.len(), 1, "expected 1 ruled table, got {runs:?}");
         match &runs[0].block {
             Block::Table { header, rows } => {
@@ -3962,7 +5597,7 @@ mod tests {
             line("c", 90.0, 155.0, 10.0, 10.0),
             line("d", 190.0, 155.0, 10.0, 10.0),
         ];
-        let runs = detect_ruled_tables(&lines, &graphics, 612.0, 792.0);
+        let runs = detect_ruled_tables(&lines, &extract_rule_segments(&graphics), 612.0, 792.0);
         assert_eq!(runs.len(), 1);
     }
 
@@ -3972,7 +5607,7 @@ mod tests {
         // table even though it has H+V lines on all four sides.
         let graphics = rect_borders(10.0, 10.0, 590.0, 770.0);
         let lines = vec![line("body text", 50.0, 400.0, 10.0, 10.0)];
-        let runs = detect_ruled_tables(&lines, &graphics, 612.0, 792.0);
+        let runs = detect_ruled_tables(&lines, &extract_rule_segments(&graphics), 612.0, 792.0);
         assert!(
             runs.is_empty(),
             "page-border rect should not become a table, got {runs:?}"
@@ -3990,7 +5625,7 @@ mod tests {
             graphics.push(stroke(x, 100.0, x, 190.0, 0.5));
         }
         let lines = vec![line("only", 90.0, 115.0, 10.0, 10.0)];
-        let runs = detect_ruled_tables(&lines, &graphics, 612.0, 792.0);
+        let runs = detect_ruled_tables(&lines, &extract_rule_segments(&graphics), 612.0, 792.0);
         assert!(runs.is_empty());
     }
 
@@ -4014,7 +5649,7 @@ mod tests {
             line("alice", 90.0, 155.0, 10.0, 10.0),
             line("99", 190.0, 155.0, 10.0, 10.0),
         ];
-        let runs = detect_ruled_tables(&lines, &graphics, 612.0, 792.0);
+        let runs = detect_ruled_tables(&lines, &extract_rule_segments(&graphics), 612.0, 792.0);
         assert_eq!(runs.len(), 1);
         match &runs[0].block {
             Block::Table { header, rows } => {

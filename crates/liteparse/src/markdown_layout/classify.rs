@@ -19,7 +19,7 @@ use super::paragraphs::{
     continues_paragraph, ends_hyphenated, ends_sentence_final, is_soft_hyphen_break,
 };
 use super::repetition::is_header_or_footer;
-use super::tables::{detect_ruled_tables, detect_tables, merge_table_runs};
+use super::tables::{detect_ruled_tables, detect_tables_banded, merge_table_runs};
 
 /// A document-order page interruption that breaks the normal text flow: either
 /// a horizontal rule (from vector graphics) or a figure injection (a raster
@@ -160,12 +160,15 @@ pub fn classify_page_with_filters(
     // the region pipeline, and emit each table as a y-positioned interruption.
     // Runs before cross-region merge so that pass (and the region indices its
     // runs carry) operate on the already-filtered line list.
+    // Rule segments are extracted from the page graphics once and shared by
+    // every table-detection pass below (global, per-region, leaf veto, bands).
+    let rule_segments = super::tables::extract_rule_segments(&page.graphics);
     let mut global_ruled_tables: Vec<(f32, Block)> = Vec::new();
     let mut global_ruled_consumed: std::collections::HashSet<usize> =
         std::collections::HashSet::new();
     for (run, consumed) in super::tables::detect_ruled_tables_global(
         lines,
-        &page.graphics,
+        &rule_segments,
         page.page_width,
         page.page_height,
     ) {
@@ -186,14 +189,20 @@ pub fn classify_page_with_filters(
         // override (a decorative frame can span a data table plus surrounding
         // prose; the data region tables cleanly by itself, while the frame
         // would fuse prose into garbage cells).
+        // The leaf must also hold a material share of the run. A leaf with a
+        // handful of the lines - a landscape slide's title band sitting above
+        // the table, which tables "successfully" on its own as a row of
+        // gutter-split title fragments - is not evidence that the per-region
+        // path has this content covered; vetoing on it drops the whole table
+        // and spills its body rows into prose.
         let already_handled = groups.values().any(|idxs| {
-            if idxs.len() < 2 {
+            if idxs.len() < 2 || idxs.len() * 4 < consumed.len() {
                 return false;
             }
             let sub: Vec<ProjectedLine> = idxs.iter().map(|&i| lines[i].clone()).collect();
             !super::tables::detect_ruled_tables(
                 &sub,
-                &page.graphics,
+                &rule_segments,
                 page.page_width,
                 page.page_height,
             )
@@ -374,6 +383,7 @@ pub fn classify_page_with_filters(
             region_lines,
             region_interruptions,
             page,
+            &rule_segments,
             heading_map,
             outline,
             toc_page,
@@ -477,6 +487,7 @@ fn classify_region(
     lines: &[ProjectedLine],
     interruptions: Vec<(f32, Interruption)>,
     page: &ParsedPage,
+    rule_segments: &super::tables::RuleSegments,
     heading_map: &[(f32, u8)],
     outline: &[OutlineTarget],
     toc_page: bool,
@@ -496,8 +507,9 @@ fn classify_region(
     // graphics are still consulted for ruled-table detection because path
     // objects are page-coordinate; the detector intersects them against the
     // sub-list's line bboxes anyway.
-    let ruled_runs = detect_ruled_tables(lines, &page.graphics, page.page_width, page.page_height);
-    let borderless_runs = precomputed_tables.unwrap_or_else(|| detect_tables(lines));
+    let ruled_runs = detect_ruled_tables(lines, rule_segments, page.page_width, page.page_height);
+    let borderless_runs = precomputed_tables
+        .unwrap_or_else(|| detect_tables_banded(lines, rule_segments, page.page_height));
     let table_runs = merge_table_runs(ruled_runs, borderless_runs);
 
     // Region-wide pre-pass: which line indices carry a lettered/roman marker
