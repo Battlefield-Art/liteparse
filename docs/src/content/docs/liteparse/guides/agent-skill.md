@@ -32,10 +32,9 @@ inside Claude Code or Codex.
 | --- | --- |
 | Node 18+ and `npm i -g @llamaindex/liteparse` | The `lit` CLI the skill drives — verify with `lit --version` |
 | [LibreOffice](https://www.libreoffice.org/) | Parsing Office files (DOCX, XLSX, PPTX) |
-| [ImageMagick](https://imagemagick.org/) | Parsing image files |
 | [`uv`](https://docs.astral.sh/uv/) | The bundled ranked-search helper |
 
-No API key is required — everything runs on your machine.
+No API key is required since everything runs on your machine.
 
 ## What the skill teaches
 
