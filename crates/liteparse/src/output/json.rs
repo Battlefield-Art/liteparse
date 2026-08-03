@@ -395,6 +395,7 @@ mod tests {
             form_type: None,
             creator: Some("LibreOffice".into()),
             producer: Some("LibreOffice 7.4".into()),
+            doc_meta: Some(crate::types::DocumentMetadata::default()),
             xfa_packets: Some(vec![crate::types::XfaPacket {
                 index: 0,
                 name: Some("datasets".into()),
@@ -406,6 +407,7 @@ mod tests {
             serde_json::from_str(&format_json_result(&result, false).unwrap()).unwrap();
         assert!(value.get("creator").is_none());
         assert!(value.get("producer").is_none());
+        assert!(value.get("doc_meta").is_none());
         assert_eq!(value["xfa_packets"][0]["name"], "datasets");
         assert_eq!(value["xfa_packets"][0]["content_length"], 11);
         assert_eq!(value["images"][0]["bbox"]["x"], 10.0);

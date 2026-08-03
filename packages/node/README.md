@@ -101,7 +101,12 @@ title, typed attributes, MCIDs, children, and referenced link annotations. Untag
 pages have an empty `roots` array; the field is omitted when disabled.
 
 Every result also carries the document's `/Info` `creator`/`producer` when
-present (API-level only, not in CLI JSON), and with `extractContentBounds`
+present. With `extractDocumentMetadata`, `result.docMeta` adds a provenance
+object with dates, PDF version/security, signature state, incremental-save
+markers, trailer ID comparison, the catalog's XMP packet (capped at 64 KiB;
+skipped for sources over 16 MiB), and source size — off by default since it
+streams the whole file, and absent for inputs converted from a non-PDF
+format. These are API-level only, not in CLI JSON. With `extractContentBounds`
 each page carries a `contentBounds` union bbox of its top-level content
 objects. With `extractXfaPackets`, `result.xfaPackets` lists each raw XFA
 packet (index, name, content length, XML content); non-XFA documents yield an

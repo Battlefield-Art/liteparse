@@ -75,6 +75,11 @@ pub struct LiteParseConfig {
     /// yield an empty list.
     #[serde(default)]
     pub extract_xfa_packets: bool,
+    /// Collect document-level provenance metadata into `ParseResult.doc_meta`.
+    /// Default `false`: `None` for inputs converted from a non-PDF format,
+    /// since the facts would describe the intermediate PDF rather than the caller's file.
+    #[serde(default)]
+    pub extract_document_metadata: bool,
     /// Detect solid rectangles and thick lines in rendered page screenshots
     /// and attach them to each `ScreenshotResult.rects`. Works on the raster,
     /// so it also finds structure in scanned/flattened pages that have no
@@ -224,6 +229,7 @@ impl Default for LiteParseConfig {
             extract_structure_tree: false,
             extract_content_bounds: false,
             extract_xfa_packets: false,
+            extract_document_metadata: false,
             detect_screenshot_rects: false,
             render_form_fields: false,
             ocr_failure_fatal: true,

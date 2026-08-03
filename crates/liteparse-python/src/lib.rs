@@ -611,7 +611,63 @@ struct PyParseResult {
     #[pyo3(get)]
     producer: Option<String>,
     #[pyo3(get)]
+    doc_meta: Option<PyDocumentMetadata>,
+    #[pyo3(get)]
     xfa_packets: Option<Vec<PyXfaPacket>>,
+}
+
+#[pyclass(frozen, from_py_object)]
+#[derive(Clone)]
+struct PyDocumentMetadata {
+    #[pyo3(get)]
+    creation_date: Option<String>,
+    #[pyo3(get)]
+    mod_date: Option<String>,
+    #[pyo3(get)]
+    file_version: Option<i32>,
+    #[pyo3(get)]
+    is_encrypted: Option<bool>,
+    #[pyo3(get)]
+    security_handler_revision: Option<i32>,
+    #[pyo3(get)]
+    permissions: Option<u64>,
+    #[pyo3(get)]
+    eof_section_count: Option<u32>,
+    #[pyo3(get)]
+    startxref_count: Option<u32>,
+    #[pyo3(get)]
+    trailer_id_pair_differs: Option<bool>,
+    #[pyo3(get)]
+    raw_file_size: Option<u64>,
+    #[pyo3(get)]
+    xmp: Option<String>,
+    #[pyo3(get)]
+    xmp_truncated: Option<bool>,
+    #[pyo3(get)]
+    signature_count: Option<u32>,
+    #[pyo3(get)]
+    signature_byte_range_reaches_eof: Option<bool>,
+}
+
+impl From<liteparse::types::DocumentMetadata> for PyDocumentMetadata {
+    fn from(metadata: liteparse::types::DocumentMetadata) -> Self {
+        Self {
+            creation_date: metadata.creation_date,
+            mod_date: metadata.mod_date,
+            file_version: metadata.file_version,
+            is_encrypted: metadata.is_encrypted,
+            security_handler_revision: metadata.security_handler_revision,
+            permissions: metadata.permissions,
+            eof_section_count: metadata.eof_section_count,
+            startxref_count: metadata.startxref_count,
+            trailer_id_pair_differs: metadata.trailer_id_pair_differs,
+            raw_file_size: metadata.raw_file_size,
+            xmp: metadata.xmp,
+            xmp_truncated: metadata.xmp_truncated,
+            signature_count: metadata.signature_count,
+            signature_byte_range_reaches_eof: metadata.signature_byte_range_reaches_eof,
+        }
+    }
 }
 
 /// One raw packet from an XFA form document's `/XFA` array.
@@ -677,6 +733,7 @@ impl PyParseResult {
             form_type: result.form_type,
             creator: result.creator,
             producer: result.producer,
+            doc_meta: result.doc_meta.map(Into::into),
             xfa_packets: result.xfa_packets.map(|packets| {
                 packets
                     .into_iter()
@@ -1013,6 +1070,8 @@ struct PyLiteParseConfig {
     #[pyo3(get)]
     extract_xfa_packets: bool,
     #[pyo3(get)]
+    extract_document_metadata: bool,
+    #[pyo3(get)]
     extract_content_bounds: bool,
     #[pyo3(get)]
     detect_screenshot_rects: bool,
@@ -1085,6 +1144,7 @@ impl PyLiteParseConfig {
             extract_form_fields: cfg.extract_form_fields,
             extract_structure_tree: cfg.extract_structure_tree,
             extract_xfa_packets: cfg.extract_xfa_packets,
+            extract_document_metadata: cfg.extract_document_metadata,
             extract_content_bounds: cfg.extract_content_bounds,
             detect_screenshot_rects: cfg.detect_screenshot_rects,
             render_form_fields: cfg.render_form_fields,
@@ -1143,6 +1203,7 @@ impl LiteParse {
         extract_form_fields = None,
         extract_structure_tree = None,
         extract_xfa_packets = None,
+        extract_document_metadata = None,
         extract_content_bounds = None,
         detect_screenshot_rects = None,
         render_form_fields = None,
@@ -1178,6 +1239,7 @@ impl LiteParse {
         extract_form_fields: Option<bool>,
         extract_structure_tree: Option<bool>,
         extract_xfa_packets: Option<bool>,
+        extract_document_metadata: Option<bool>,
         extract_content_bounds: Option<bool>,
         detect_screenshot_rects: Option<bool>,
         render_form_fields: Option<bool>,
@@ -1264,6 +1326,9 @@ impl LiteParse {
         }
         if let Some(v) = extract_xfa_packets {
             cfg.extract_xfa_packets = v;
+        }
+        if let Some(v) = extract_document_metadata {
+            cfg.extract_document_metadata = v;
         }
         if let Some(v) = extract_content_bounds {
             cfg.extract_content_bounds = v;
@@ -1491,6 +1556,7 @@ fn _liteparse(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<LiteParse>()?;
     m.add_class::<PyLiteParseConfig>()?;
     m.add_class::<PyParseResult>()?;
+    m.add_class::<PyDocumentMetadata>()?;
     m.add_class::<PyExtractedImage>()?;
     m.add_class::<PyImageRect>()?;
     m.add_class::<PyParsedPage>()?;

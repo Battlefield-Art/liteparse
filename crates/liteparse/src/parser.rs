@@ -14,7 +14,8 @@ use crate::projection;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::render;
 use crate::types::{
-    ExtractedImage, OutlineTarget, Page, ParsedPage, PdfInput, ScreenshotRect, XfaPacket,
+    DocumentMetadata, ExtractedImage, OutlineTarget, Page, ParsedPage, PdfInput, ScreenshotRect,
+    XfaPacket,
 };
 use pdfium::Library;
 
@@ -42,6 +43,11 @@ pub struct ParseResult {
     pub creator: Option<String>,
     /// The document's `/Info` `Producer` entry, when present.
     pub producer: Option<String>,
+    /// Document provenance metadata (dates, version/security, signatures,
+    /// incremental-save markers, trailer IDs, raw XMP, and source size).
+    /// Present only when `extract_document_metadata` is enabled, and `None`
+    /// for inputs converted from a non-PDF format.
+    pub doc_meta: Option<DocumentMetadata>,
     /// Raw XFA packets, present only when `extract_xfa_packets` is enabled.
     /// `Some([])` means extraction ran on a non-XFA document.
     pub xfa_packets: Option<Vec<XfaPacket>>,
@@ -360,6 +366,13 @@ impl LiteParse {
         let (validated_input, _guard) =
             conversion::resolve_pdf_input(input, self.config.password.as_deref(), false).await?;
 
+        // Provenance facts describe the file on disk, so they are meaningless
+        // for a PDF we generated ourselves from a DOCX/XLSX/image.
+        #[cfg(not(target_arch = "wasm32"))]
+        let want_doc_meta = self.config.extract_document_metadata && !_guard.is_converted();
+        #[cfg(target_arch = "wasm32")]
+        let want_doc_meta = self.config.extract_document_metadata;
+
         #[cfg(target_arch = "wasm32")]
         let validated_input = input;
 
@@ -429,6 +442,7 @@ impl LiteParse {
             form_type,
             creator,
             producer,
+            doc_meta,
             xfa_packets,
         ) = {
             let lib = Library::init();
@@ -455,6 +469,18 @@ impl LiteParse {
                 .then(|| document.form_type());
             let creator = document.meta_text("Creator");
             let producer = document.meta_text("Producer");
+            let doc_meta = want_doc_meta.then(|| {
+                // AcroForm repair rewrites the file, so provenance has to come
+                // from the original document; fall back if it no longer loads.
+                #[cfg(not(target_arch = "wasm32"))]
+                if repaired_input.is_some()
+                    && let Ok(source) =
+                        extract::load_document_from_input(&lib, &validated_input, password)
+                {
+                    return crate::document_metadata::extract(&validated_input, &source);
+                }
+                crate::document_metadata::extract(&validated_input, &document)
+            });
             let xfa_packets = self.config.extract_xfa_packets.then(|| {
                 document
                     .xfa_packets()
@@ -544,6 +570,7 @@ impl LiteParse {
                 form_type,
                 creator,
                 producer,
+                doc_meta,
                 xfa_packets,
             )
         };
@@ -639,6 +666,7 @@ impl LiteParse {
             form_type,
             creator,
             producer,
+            doc_meta,
             xfa_packets,
         })
     }
@@ -683,6 +711,7 @@ impl LiteParse {
             form_type: None,
             creator: None,
             producer: None,
+            doc_meta: None,
             xfa_packets: None,
         }
     }

@@ -220,6 +220,30 @@ class XfaPacket:
 
 
 @dataclass
+class DocumentMetadata:
+    """Document-level provenance metadata from PDFium and the source PDF."""
+    creation_date: Optional[str] = None
+    mod_date: Optional[str] = None
+    #: Encoded PDF version (14 means PDF 1.4).
+    file_version: Optional[int] = None
+    is_encrypted: Optional[bool] = None
+    security_handler_revision: Optional[int] = None
+    permissions: Optional[int] = None
+    eof_section_count: Optional[int] = None
+    startxref_count: Optional[int] = None
+    trailer_id_pair_differs: Optional[bool] = None
+    raw_file_size: Optional[int] = None
+    #: The document catalog's ``/Metadata`` XMP packet, capped at 64 KiB.
+    #: ``None`` when the document has none or it is too large to resolve
+    #: cheaply.
+    xmp: Optional[str] = None
+    #: True when the catalog's XMP stream exceeded the 64 KiB cap.
+    xmp_truncated: Optional[bool] = None
+    signature_count: Optional[int] = None
+    signature_byte_range_reaches_eof: Optional[bool] = None
+
+
+@dataclass
 class ParseResult:
     """Result of parsing a document."""
     pages: List[ParsedPage]
@@ -232,6 +256,10 @@ class ParseResult:
     creator: Optional[str] = None
     #: The document's ``/Info`` ``Producer`` entry, when present.
     producer: Optional[str] = None
+    #: Document-level provenance metadata. Present only when
+    #: ``extract_document_metadata=True`` and the input was a real PDF
+    #: (not converted from DOCX/XLSX/an image).
+    doc_meta: Optional[DocumentMetadata] = None
     #: Raw XFA packets; present only when ``extract_xfa_packets=True``.
     xfa_packets: Optional[List[XfaPacket]] = None
 
@@ -381,6 +409,7 @@ class LiteParseConfig:
     extract_images: bool = False
     extract_vector_graphics: bool = False
     extract_xfa_packets: bool = False
+    extract_document_metadata: bool = False
     detect_screenshot_rects: bool = False
     extract_content_bounds: bool = False
 

@@ -93,6 +93,14 @@ all tagged-PDF roots and recursive elements with type, ID, actual/alternate text
 title, typed attributes, MCIDs, children, and referenced link annotations. Untagged
 pages have an empty ``roots`` list; the field is ``None`` when disabled.
 
+Every result also carries ``creator``/``producer`` from the PDF ``/Info``
+dictionary. With ``extract_document_metadata=True``, ``result.doc_meta`` adds a
+provenance object with dates, PDF version/security, signature state,
+incremental-save markers, trailer ID comparison, the catalog's XMP packet
+(capped at 64 KiB; skipped for sources over 16 MiB), and source size. It is off by default because it streams the whole source file,
+and it is ``None`` for inputs converted from a non-PDF format. These document
+fields are API-only and do not alter default CLI JSON.
+
 ## Parsing from Bytes
 
 Pass raw PDF bytes directly — useful for web uploads or downloaded files:

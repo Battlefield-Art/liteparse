@@ -50,6 +50,52 @@ pub struct XfaPacket {
     pub content: Option<Vec<u8>>,
 }
 
+/// Signature summary used for document provenance metadata.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct SignatureSummary {
+    /// `None` when the loaded pdfium build has no signature API, which is not
+    /// the same as a document with zero signatures.
+    pub count: Option<u32>,
+    /// `None` when signatures exist but PDFium did not expose any byte range.
+    pub byte_range_reaches_eof: Option<bool>,
+}
+
+/// The `fpdf_signature` entry points, resolved together. `None` when the
+/// loaded pdfium build does not export them.
+struct SignatureApi {
+    count: unsafe extern "C" fn(pdfium_sys::FPDF_DOCUMENT) -> std::os::raw::c_int,
+    object: unsafe extern "C" fn(
+        pdfium_sys::FPDF_DOCUMENT,
+        std::os::raw::c_int,
+    ) -> pdfium_sys::FPDF_SIGNATURE,
+    byte_range: unsafe extern "C" fn(
+        pdfium_sys::FPDF_SIGNATURE,
+        *mut std::os::raw::c_int,
+        std::os::raw::c_ulong,
+    ) -> std::os::raw::c_ulong,
+}
+
+impl SignatureApi {
+    #[cfg(not(target_arch = "wasm32"))]
+    fn load() -> Option<Self> {
+        let bindings = pdfium_sys::dynamic::pdfium();
+        Some(Self {
+            count: bindings.FPDF_GetSignatureCount?,
+            object: bindings.FPDF_GetSignatureObject?,
+            byte_range: bindings.FPDFSignatureObj_GetByteRange?,
+        })
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    fn load() -> Option<Self> {
+        Some(Self {
+            count: pdfium_sys::FPDF_GetSignatureCount,
+            object: pdfium_sys::FPDF_GetSignatureObject,
+            byte_range: pdfium_sys::FPDFSignatureObj_GetByteRange,
+        })
+    }
+}
+
 impl<'lib> Document<'lib> {
     pub fn page_count(&self) -> i32 {
         unsafe { ffi!(FPDF_GetPageCount(self.handle)) }
@@ -131,6 +177,76 @@ impl<'lib> Document<'lib> {
             return None;
         }
         Some(String::from_utf16_lossy(&buf[..end]))
+    }
+
+    /// Encoded PDF version (`14` means PDF 1.4), when present.
+    pub fn file_version(&self) -> Option<i32> {
+        let mut version = 0;
+        let ok = unsafe { ffi!(FPDF_GetFileVersion(self.handle, &mut version)) };
+        (ok != 0).then_some(version)
+    }
+
+    /// PDF security-handler revision, or `-1` for an unencrypted document.
+    pub fn security_handler_revision(&self) -> i32 {
+        unsafe { ffi!(FPDF_GetSecurityHandlerRevision(self.handle)) }
+    }
+
+    /// Document permission flags reported by PDFium.
+    pub fn permissions(&self) -> u64 {
+        unsafe { ffi!(FPDF_GetDocPermissions(self.handle)) as u64 }
+    }
+
+    /// Count signatures and determine whether every readable final byte-range
+    /// segment reaches the current end of the file. Needs `file_size` to answer
+    /// the byte-range question at all — without it the verdict stays `None`
+    /// rather than defaulting to "reaches EOF".
+    pub fn signature_summary(&self, file_size: Option<u64>) -> SignatureSummary {
+        const MAX_BYTE_RANGE_VALUES: usize = 8;
+        let Some(api) = SignatureApi::load() else {
+            return SignatureSummary::default();
+        };
+        let count = unsafe { (api.count)(self.handle) }.max(0) as u32;
+        let Some(file_size) = file_size.filter(|_| count > 0) else {
+            return SignatureSummary {
+                count: Some(count),
+                byte_range_reaches_eof: None,
+            };
+        };
+
+        let mut known = false;
+        let mut reaches_eof = true;
+        for index in 0..count {
+            let signature = unsafe { (api.object)(self.handle, index as i32) };
+            if signature.is_null() {
+                continue;
+            }
+            let mut ranges = [0i32; MAX_BYTE_RANGE_VALUES];
+            let len = unsafe {
+                (api.byte_range)(
+                    signature,
+                    ranges.as_mut_ptr(),
+                    ranges.len() as std::os::raw::c_ulong,
+                )
+            } as usize;
+            if !(2..=MAX_BYTE_RANGE_VALUES).contains(&len) {
+                continue;
+            }
+            known = true;
+            let start = i64::from(ranges[len - 2]);
+            let length = i64::from(ranges[len - 1]);
+            if start < 0
+                || length < 0
+                || u64::try_from(start + length)
+                    .ok()
+                    .is_some_and(|range_end| range_end < file_size)
+            {
+                reaches_eof = false;
+            }
+        }
+        SignatureSummary {
+            count: Some(count),
+            byte_range_reaches_eof: known.then_some(reaches_eof),
+        }
     }
 
     /// Number of packets in the document's `/XFA` array (0 for non-XFA docs).

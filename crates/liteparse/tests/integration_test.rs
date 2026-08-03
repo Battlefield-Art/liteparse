@@ -152,28 +152,62 @@ async fn test_parse_office_doc_integration() {
 #[tokio::test]
 #[serial]
 async fn test_parse_pdf_integration() {
-    let lit = LiteParse::new(LiteParseConfig::default());
+    let lit = LiteParse::new(LiteParseConfig {
+        ocr_enabled: false,
+        extract_document_metadata: true,
+        ..LiteParseConfig::default()
+    });
     let parsed = lit
         .parse("../../integration_tests_data/sample.pdf")
         .await
         .expect("Should be able to parse");
     assert_eq!(parsed.pages.len(), 1);
+    let doc_meta = parsed.doc_meta.expect("doc_meta requested");
+    assert!(doc_meta.file_version.is_some());
+    assert_eq!(doc_meta.is_encrypted, Some(false));
+    assert!(doc_meta.raw_file_size.is_some_and(|size| size > 0));
+    assert!(doc_meta.eof_section_count.is_some_and(|count| count > 0));
+    assert_eq!(doc_meta.signature_count, Some(0));
+}
+
+/// Provenance is opt-in and stays absent on the default path.
+#[tokio::test]
+#[serial]
+async fn test_doc_meta_absent_unless_requested() {
+    let lit = LiteParse::new(LiteParseConfig {
+        ocr_enabled: false,
+        ..LiteParseConfig::default()
+    });
+    let parsed = lit
+        .parse("../../integration_tests_data/sample.pdf")
+        .await
+        .expect("Should be able to parse");
+    assert!(parsed.doc_meta.is_none());
 }
 
 #[tokio::test]
 #[serial]
 async fn test_parse_bytes_pdf_integration() {
     let fixture_path = "../../integration_tests_data/sample.pdf";
-    let lit = LiteParse::new(LiteParseConfig::default());
+    let lit = LiteParse::new(LiteParseConfig {
+        ocr_enabled: false,
+        extract_document_metadata: true,
+        ..LiteParseConfig::default()
+    });
     let data = tokio::fs::read(fixture_path)
         .await
         .expect("Should be able to read file");
+    let expected_size = data.len() as u64;
     let input = PdfInput::Bytes(data);
     let parsed = lit
         .parse_input(input)
         .await
         .expect("Should be able to parse");
     assert_eq!(parsed.pages.len(), 1);
+    assert_eq!(
+        parsed.doc_meta.and_then(|meta| meta.raw_file_size),
+        Some(expected_size)
+    );
 }
 
 /// Stress test: many concurrent `parse_input` calls on a multi-threaded

@@ -20,6 +20,7 @@ from .types import (
     ParsedPage,
     ParseError,
     ParseResult,
+    DocumentMetadata,
     ScreenshotRect,
     ScreenshotResult,
     TextItem,
@@ -308,6 +309,33 @@ def _convert_native_result(native_result: Any) -> ParseResult:
         for img in getattr(native_result, "images", [])
     ]
     native_xfa_packets = getattr(native_result, "xfa_packets", None)
+    native_doc_meta = getattr(native_result, "doc_meta", None)
+    doc_meta = (
+        None
+        if native_doc_meta is None
+        else DocumentMetadata(
+            creation_date=getattr(native_doc_meta, "creation_date", None),
+            mod_date=getattr(native_doc_meta, "mod_date", None),
+            file_version=getattr(native_doc_meta, "file_version", None),
+            is_encrypted=getattr(native_doc_meta, "is_encrypted", None),
+            security_handler_revision=getattr(
+                native_doc_meta, "security_handler_revision", None
+            ),
+            permissions=getattr(native_doc_meta, "permissions", None),
+            eof_section_count=getattr(native_doc_meta, "eof_section_count", None),
+            startxref_count=getattr(native_doc_meta, "startxref_count", None),
+            trailer_id_pair_differs=getattr(
+                native_doc_meta, "trailer_id_pair_differs", None
+            ),
+            raw_file_size=getattr(native_doc_meta, "raw_file_size", None),
+            xmp=getattr(native_doc_meta, "xmp", None),
+            xmp_truncated=getattr(native_doc_meta, "xmp_truncated", None),
+            signature_count=getattr(native_doc_meta, "signature_count", None),
+            signature_byte_range_reaches_eof=getattr(
+                native_doc_meta, "signature_byte_range_reaches_eof", None
+            ),
+        )
+    )
     return ParseResult(
         pages=pages,
         text=native_result.text,
@@ -316,6 +344,7 @@ def _convert_native_result(native_result: Any) -> ParseResult:
         form_type=getattr(native_result, "form_type", None),
         creator=getattr(native_result, "creator", None),
         producer=getattr(native_result, "producer", None),
+        doc_meta=doc_meta,
         xfa_packets=(
             [
                 XfaPacket(
@@ -370,6 +399,7 @@ class LiteParse:
         extract_form_fields: Optional[bool] = None,
         extract_structure_tree: Optional[bool] = None,
         extract_xfa_packets: Optional[bool] = None,
+        extract_document_metadata: Optional[bool] = None,
         extract_content_bounds: Optional[bool] = None,
         detect_screenshot_rects: Optional[bool] = None,
         render_form_fields: Optional[bool] = None,
@@ -497,6 +527,8 @@ class LiteParse:
             kwargs["extract_structure_tree"] = extract_structure_tree
         if extract_xfa_packets is not None:
             kwargs["extract_xfa_packets"] = extract_xfa_packets
+        if extract_document_metadata is not None:
+            kwargs["extract_document_metadata"] = extract_document_metadata
         if extract_content_bounds is not None:
             kwargs["extract_content_bounds"] = extract_content_bounds
         if detect_screenshot_rects is not None:
@@ -680,6 +712,7 @@ class LiteParse:
             extract_images=cfg.extract_images,
             extract_vector_graphics=cfg.extract_vector_graphics,
             extract_xfa_packets=cfg.extract_xfa_packets,
+            extract_document_metadata=cfg.extract_document_metadata,
             extract_content_bounds=cfg.extract_content_bounds,
             detect_screenshot_rects=cfg.detect_screenshot_rects,
         )

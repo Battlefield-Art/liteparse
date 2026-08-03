@@ -88,6 +88,15 @@ pub struct PdfInputGuard {
     temps: Vec<TempDir>,
 }
 
+impl PdfInputGuard {
+    /// True when the resolved input is a temporary PDF produced by converting
+    /// a non-PDF source, so raw-file facts describe the intermediate, not the
+    /// document the caller passed in.
+    pub fn is_converted(&self) -> bool {
+        !self.temps.is_empty()
+    }
+}
+
 /// Resolve a document input to a PDF suitable for rendering or text extraction.
 ///
 /// When `reject_text_formats` is true, plain-text files (`.txt`, etc.) return a

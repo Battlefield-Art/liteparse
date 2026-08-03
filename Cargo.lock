@@ -2027,6 +2027,7 @@ dependencies = [
  "liteparse-pdfium",
  "liteparse-pdfium-sys",
  "lopdf",
+ "memchr",
  "oar-ocr",
  "ordered-float",
  "regex",

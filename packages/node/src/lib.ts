@@ -48,6 +48,11 @@ export interface LiteParseConfig {
   extractStructureTree: boolean;
   /** Extract raw XFA packets (name + XML content) into `ParseResult.xfaPackets` (default: false). */
   extractXfaPackets: boolean;
+  /**
+   * Collect document provenance metadata into `result.docMeta`. Default
+   * false: Absent for inputs converted from a non-PDF format.
+   */
+  extractDocumentMetadata: boolean;
   /** Emit each page's `contentBounds` (union bbox of top-level content objects) (default: false). */
   extractContentBounds: boolean;
   /** Detect solid rectangles/lines in rendered page screenshots (default: false). */
@@ -354,8 +359,40 @@ export interface ParseResult {
   creator?: string;
   /** The document's `/Info` `Producer` entry, when present. */
   producer?: string;
+  /**
+   * Document-level provenance metadata from PDFium and the source PDF.
+   * Present only when `extractDocumentMetadata` is enabled and the input was
+   * a real PDF (not converted from DOCX/XLSX/an image).
+   */
+  docMeta?: DocumentMetadata;
   /** Raw XFA packets; present only when `extractXfaPackets` is enabled. */
   xfaPackets?: XfaPacket[];
+}
+
+/** Provenance and tamper-analysis facts extracted from the source PDF. */
+export interface DocumentMetadata {
+  creationDate?: string;
+  modDate?: string;
+  /** Encoded PDF version (`14` means PDF 1.4). */
+  fileVersion?: number;
+  isEncrypted?: boolean;
+  securityHandlerRevision?: number;
+  permissions?: number;
+  eofSectionCount?: number;
+  startxrefCount?: number;
+  trailerIdPairDiffers?: boolean;
+  rawFileSize?: number;
+  /**
+   * The document catalog's `/Metadata` XMP packet, capped at 64 KiB. Absent
+   * when the document has none, when it is too large to resolve cheaply, or
+   * in WASM builds.
+   */
+  xmp?: string;
+  /** True when the catalog's XMP stream exceeded the 64 KiB cap. */
+  xmpTruncated?: boolean;
+  signatureCount?: number;
+  /** False when bytes were appended after a readable signature byte range. */
+  signatureByteRangeReachesEof?: boolean;
 }
 
 /** One raw packet from an XFA form document's `/XFA` array. */
@@ -505,6 +542,7 @@ export class LiteParse {
       extractFormFields: userConfig.extractFormFields,
       extractStructureTree: userConfig.extractStructureTree,
       extractXfaPackets: userConfig.extractXfaPackets,
+      extractDocumentMetadata: userConfig.extractDocumentMetadata,
       extractContentBounds: userConfig.extractContentBounds,
       detectScreenshotRects: userConfig.detectScreenshotRects,
       renderFormFields: userConfig.renderFormFields,
@@ -545,6 +583,7 @@ export class LiteParse {
       extractFormFields: resolved.extractFormFields ?? false,
       extractStructureTree: resolved.extractStructureTree ?? false,
       extractXfaPackets: resolved.extractXfaPackets ?? false,
+      extractDocumentMetadata: resolved.extractDocumentMetadata ?? false,
       extractContentBounds: resolved.extractContentBounds ?? false,
       detectScreenshotRects: resolved.detectScreenshotRects ?? false,
       renderFormFields: resolved.renderFormFields ?? false,
@@ -576,6 +615,7 @@ export class LiteParse {
       formType: result.formType,
       creator: result.creator,
       producer: result.producer,
+      docMeta: result.docMeta,
       xfaPackets: result.xfaPackets,
     };
   }
@@ -600,6 +640,7 @@ export class LiteParse {
       text: result.text,
       images: (result.images ?? []).map(toImage),
       imageErrorCount: result.imageErrorCount ?? 0,
+      docMeta: result.docMeta,
     };
   }
 
