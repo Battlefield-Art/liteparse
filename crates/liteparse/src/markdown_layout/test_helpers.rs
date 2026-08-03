@@ -5,6 +5,7 @@ use crate::types::{Anchor, GraphicPrimitive, ParsedPage, ProjectedLine, Rect, Te
 pub(crate) fn line(text: &str, x: f32, y: f32, h: f32, size: f32) -> ProjectedLine {
     ProjectedLine {
         text: text.into(),
+        rtl: crate::bidi::is_rtl_text(text),
         bbox: Rect {
             x,
             y,
@@ -84,6 +85,7 @@ pub(crate) fn line_with_spans(cells: &[(&str, f32)], y: f32, size: f32) -> Proje
             .map(|(t, _)| *t)
             .collect::<Vec<_>>()
             .join("   "),
+        rtl: false,
         bbox: Rect {
             x: min_x,
             y,
@@ -134,6 +136,7 @@ pub(crate) fn styled_line(spans: &[(&str, f32, Option<&str>)], y: f32, size: f32
         .map(|s| s.x + s.width)
         .fold(f32::NEG_INFINITY, f32::max);
     ProjectedLine {
+        rtl: crate::bidi::is_rtl_text(&joined),
         text: joined,
         bbox: Rect {
             x: min_x,

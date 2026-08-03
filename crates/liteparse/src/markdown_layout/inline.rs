@@ -105,10 +105,17 @@ pub(super) fn render_line_inline(line: &ProjectedLine) -> String {
         return collapse_whitespace(&line.text);
     }
 
-    // Sort spans by x so we render in visual reading order regardless of
-    // extraction order. Stable so equal-x spans keep their original sequence.
+    // Sort spans into reading order regardless of extraction order. Stable so
+    // equal-x spans keep their original sequence. A right-to-left line reads
+    // from the highest x down, matching the join `build_one_line` used for
+    // `line.text` — the uniform-style shortcut below falls back on that string,
+    // so the two orderings have to agree.
     let mut spans = spans;
-    spans.sort_by(|a, b| a.x.total_cmp(&b.x));
+    if line.rtl {
+        spans.sort_by(|a, b| b.x.total_cmp(&a.x));
+    } else {
+        spans.sort_by(|a, b| a.x.total_cmp(&b.x));
+    }
 
     let styles: Vec<SpanStyle> = spans.iter().map(|s| SpanStyle::from_item(s)).collect();
     let links: Vec<Option<&str>> = spans.iter().map(|s| s.link.as_deref()).collect();

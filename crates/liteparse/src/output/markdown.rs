@@ -134,6 +134,7 @@ mod tests {
     fn line(text: &str, x: f32, y: f32, h: f32, size: f32) -> ProjectedLine {
         ProjectedLine {
             text: text.into(),
+            rtl: crate::bidi::is_rtl_text(text),
             bbox: Rect {
                 x,
                 y,

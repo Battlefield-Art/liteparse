@@ -25,6 +25,7 @@ pub mod types;
 // ── Internal modules (available for binding crates, hidden from docs) ──
 #[cfg(not(target_arch = "wasm32"))]
 mod acroform_repair;
+mod bidi;
 #[cfg(not(target_arch = "wasm32"))]
 #[doc(hidden)]
 pub mod conversion;

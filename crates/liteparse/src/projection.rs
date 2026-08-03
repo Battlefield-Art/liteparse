@@ -4737,11 +4737,15 @@ fn build_one_line(
     figures: &[Rect],
 ) -> ProjectedLine {
     // Sort by x so concatenation reads left→right even if reading order had
-    // rotated insertions.
+    // rotated insertions. `spans` stays in this x-ascending order — the table
+    // cell splitter and the inline emphasis renderer both read geometry off it
+    // — while `text` below is joined in *reading* order, which for a
+    // right-to-left line runs the other way across the page.
     let mut sorted: Vec<usize> = idxs.to_vec();
     sorted.sort_by(|a, b| items[*a].item.x.total_cmp(&items[*b].item.x));
 
-    let mut text = String::new();
+    // Item texts in x order; joined once the line's base direction is known.
+    let mut piece_texts: Vec<&str> = Vec::with_capacity(sorted.len());
     let mut min_x = f32::INFINITY;
     let mut min_y = f32::INFINITY;
     let mut max_x = f32::NEG_INFINITY;
@@ -4770,7 +4774,7 @@ fn build_one_line(
     let mut mcid: Option<i32> = None;
     let mut spans: Vec<TextItem> = Vec::with_capacity(sorted.len());
 
-    for (pos, &i) in sorted.iter().enumerate() {
+    for &i in sorted.iter() {
         let proj = &items[i];
         let it = &proj.item;
         // `handle_rotation_reading_order` zeroes `item.rotation` after it
@@ -4783,13 +4787,10 @@ fn build_one_line(
         span.rotation = proj.orig_rotation;
         spans.push(span);
 
-        // Concatenate item text. Use existing num_spaces from projection only as
+        // Collect item text. Use existing num_spaces from projection only as
         // a hint — the markdown emitter re-collapses whitespace, so we just
         // ensure there's *some* separation between adjacent items.
-        if pos > 0 && !text.ends_with(' ') {
-            text.push(' ');
-        }
-        text.push_str(&it.text);
+        piece_texts.push(it.text.as_str());
 
         min_x = min_x.min(it.x);
         min_y = min_y.min(it.y);
@@ -4847,6 +4848,25 @@ fn build_one_line(
         if mcid.is_none() {
             mcid = it.mcid;
         }
+    }
+
+    // Join the line in reading order. PDFium already hands back each item's
+    // characters in logical order, so a right-to-left line only needs its
+    // *items* walked right-to-left across the page — otherwise an invoice line
+    // like "المجموع الفرعي: 75.00 SAR" comes out as "SAR 75.00 المجموع الفرعي:",
+    // detaching every label from its value. Direction is decided from the
+    // assembled line, so a neutral-only line (pure digits) stays LTR and every
+    // left-to-right document takes exactly the path it took before.
+    let rtl = crate::bidi::is_rtl_pieces(piece_texts.iter().copied());
+    if rtl {
+        piece_texts.reverse();
+    }
+    let mut text = String::new();
+    for piece in &piece_texts {
+        if !text.is_empty() && !text.ends_with(' ') {
+            text.push(' ');
+        }
+        text.push_str(piece);
     }
 
     // NOTE on tie-breaks: `max_by_key` over a HashMap returns the *last* max it
@@ -4947,6 +4967,7 @@ fn build_one_line(
 
     ProjectedLine {
         text,
+        rtl,
         bbox: bbox.clone(),
         anchor,
         // Real column detection is deferred (carry-forward in MARKDOWN_PROGRESS).
