@@ -194,9 +194,10 @@ pub(crate) fn extract_pages_and_images(
         }
 
         // PDFium's text API reads only the page content stream. Filled form
-        // values commonly live in widget appearance streams, so flatten the
-        // page's visible annotations in memory and reload before extracting text.
-        // This does not initialize the form environment or execute document JS.
+        // values commonly live in widget appearance streams, so promote only
+        // those widget appearances into page content and reload before text
+        // extraction. Non-widget annotations are excluded, and this does not
+        // initialize the form environment or execute document JS.
         let extract_text = |page: &Page| -> Result<Vec<TextItem>, LiteParseError> {
             let text_page = page.text()?;
             extract_page_text_items(
@@ -208,14 +209,15 @@ pub(crate) fn extract_pages_and_images(
                 output_options.extract_text_metadata,
             )
         };
-        let mut text_items = if page.has_form_widget_text() && page.flatten_for_display() {
-            flattened_form_widgets = true;
-            drop(page);
-            let flattened_page = document.page(page_index)?;
-            extract_text(&flattened_page)?
-        } else {
-            extract_text(&page)?
-        };
+        let mut text_items =
+            if page.has_form_widget_text() && page.flatten_form_widgets_for_display() {
+                flattened_form_widgets = true;
+                drop(page);
+                let flattened_page = document.page(page_index)?;
+                extract_text(&flattened_page)?
+            } else {
+                extract_text(&page)?
+            };
         assign_links(&mut text_items, &links);
         assign_strikethrough(&mut text_items, &graphics);
 

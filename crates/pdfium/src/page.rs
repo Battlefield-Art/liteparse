@@ -939,15 +939,54 @@ impl<'doc, 'lib: 'doc> Page<'doc, 'lib> {
         false
     }
 
-    /// Promote visible annotation and form appearances into page content.
-    /// Returns true only when PDFium changed the page.
-    pub fn flatten_for_display(&self) -> bool {
-        unsafe {
+    /// Promote visible form-widget appearances into page content without
+    /// admitting comment, markup, stamp, or other annotation appearances into
+    /// the text layer.
+    ///
+    /// PDFium's flatten operation is page-wide and otherwise consumes every
+    /// visible annotation. Hide non-widget annotations in this disposable
+    /// extraction document first; callers snapshot annotation metadata and
+    /// reopen the pristine input for any later rendering work.
+    ///
+    /// Returns true only when PDFium changed the page. If suppression or
+    /// flattening fails, restores any changed flags and leaves extraction on
+    /// the original page content.
+    pub fn flatten_form_widgets_for_display(&self) -> bool {
+        let mut suppressed = Vec::new();
+        let count = unsafe { ffi!(FPDFPage_GetAnnotCount(self.handle)) };
+        for index in 0..count {
+            let annot = unsafe { ffi!(FPDFPage_GetAnnot(self.handle, index)) };
+            if annot.is_null() {
+                continue;
+            }
+            let subtype = unsafe { ffi!(FPDFAnnot_GetSubtype(annot)) };
+            if subtype != pdfium_sys::FPDF_ANNOT_WIDGET as i32 {
+                let flags = unsafe { ffi!(FPDFAnnot_GetFlags(annot)) };
+                if flags & pdfium_sys::FPDF_ANNOT_FLAG_HIDDEN as i32 == 0 {
+                    let hidden_flags = flags | pdfium_sys::FPDF_ANNOT_FLAG_HIDDEN as i32;
+                    let changed = unsafe { ffi!(FPDFAnnot_SetFlags(annot, hidden_flags)) } != 0;
+                    unsafe { ffi!(FPDFPage_CloseAnnot(annot)) };
+                    if !changed {
+                        restore_annotation_flags(self.handle, &suppressed);
+                        return false;
+                    }
+                    suppressed.push((index, flags));
+                    continue;
+                }
+            }
+            unsafe { ffi!(FPDFPage_CloseAnnot(annot)) };
+        }
+
+        let result = unsafe {
             ffi!(FPDFPage_Flatten(
                 self.handle,
                 pdfium_sys::FLAT_NORMALDISPLAY as i32
-            )) == pdfium_sys::FLATTEN_SUCCESS as i32
+            ))
+        };
+        if result != pdfium_sys::FLATTEN_SUCCESS as i32 {
+            restore_annotation_flags(self.handle, &suppressed);
         }
+        result == pdfium_sys::FLATTEN_SUCCESS as i32
     }
 
     /// Enumerate AcroForm widget annotations and resolve their field values
@@ -1117,6 +1156,19 @@ fn annotation_paints_text(annot: pdfium_sys::FPDF_ANNOTATION) -> bool {
         !object.is_null()
             && unsafe { ffi!(FPDFPageObj_GetType(object)) } == pdfium_sys::FPDF_PAGEOBJ_TEXT as i32
     })
+}
+
+fn restore_annotation_flags(page: pdfium_sys::FPDF_PAGE, originals: &[(i32, i32)]) {
+    for &(index, flags) in originals {
+        let annot = unsafe { ffi!(FPDFPage_GetAnnot(page, index)) };
+        if annot.is_null() {
+            continue;
+        }
+        unsafe {
+            ffi!(FPDFAnnot_SetFlags(annot, flags));
+            ffi!(FPDFPage_CloseAnnot(annot));
+        }
+    }
 }
 
 fn form_field_type_name(field_type: i32) -> &'static str {

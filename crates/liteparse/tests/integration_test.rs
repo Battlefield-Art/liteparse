@@ -322,6 +322,10 @@ async fn test_filled_acroform_values_are_extracted_as_text() {
         "an unpainted default choice must not be treated as a filled value"
     );
     assert!(
+        !parsed.text.contains("ANNOTATION-ONLY-SHOULD-NOT-APPEAR"),
+        "non-widget annotation appearances must not become page text"
+    );
+    assert!(
         parsed.pages[0].form_fields.is_none(),
         "default text extraction must not enable structured form metadata"
     );
@@ -339,7 +343,19 @@ async fn test_filled_acroform_values_are_extracted_as_text() {
 
     assert_eq!(
         with_metadata.pages[0].annotations.as_ref().unwrap().len(),
-        5
+        6
+    );
+    assert!(
+        with_metadata.pages[0]
+            .annotations
+            .as_ref()
+            .unwrap()
+            .iter()
+            .any(|annotation| {
+                annotation.subtype == "freetext"
+                    && annotation.contents.as_deref() == Some("ANNOTATION-ONLY-SHOULD-NOT-APPEAR")
+            }),
+        "non-widget annotation metadata should remain available when requested"
     );
     let fields = with_metadata.pages[0].form_fields.as_ref().unwrap();
     assert_eq!(fields.len(), 5);
