@@ -66,7 +66,8 @@ pub(crate) fn extract_pages_from_document(
 /// raster image object to bytes (when `output_options.extract_images` is true). Returned
 /// `ExtractedImage`s carry the same ids the markdown emitter will reference,
 /// so callers can match them up by id. When image extraction is disabled the
-/// returned image vec is always empty.
+/// returned image vec is always empty. The final boolean reports whether a
+/// page was flattened, which mutates the open PDFium document.
 pub(crate) fn extract_pages_and_images(
     document: &Document,
     target_pages: Option<&[u32]>,
@@ -74,12 +75,13 @@ pub(crate) fn extract_pages_and_images(
     extract_links: bool,
     glyph_resolver: Option<&dyn crate::GlyphResolver>,
     output_options: ExtractionOutputOptions,
-) -> Result<(Vec<LitePage>, Vec<ExtractedImage>, u32), LiteParseError> {
+) -> Result<(Vec<LitePage>, Vec<ExtractedImage>, u32, bool), LiteParseError> {
     let page_count = document.page_count();
     let mut pages = Vec::new();
     let mut images: Vec<ExtractedImage> = Vec::new();
     let mut image_cache = ImageCache::default();
     let mut image_error_count = 0u32;
+    let mut flattened_form_widgets = false;
     let form_environment = output_options
         .extract_form_fields
         .then(|| document.form_environment())
@@ -99,24 +101,21 @@ pub(crate) fn extract_pages_and_images(
         }
 
         let page = document.page(page_index)?;
-        let text_page = page.text()?;
+        let page_width = page.width();
+        let page_height = page.height();
         let view_box = page.view_box().unwrap_or(RectF {
             left: 0.0,
-            top: page.height(),
-            right: page.width(),
+            top: page_height,
+            right: page_width,
             bottom: 0.0,
         });
-        let mut text_items = extract_page_text_items(
-            &page,
-            &text_page,
-            &view_box,
-            glyph_resolver,
-            output_options.emit_word_boxes,
-            output_options.extract_text_metadata,
-        )?;
-        if extract_links {
-            assign_links(&mut text_items, &page.links(&view_box));
-        }
+        // Once a qualifying widget is found, PDFium flattens every visible
+        // annotation on the page. Collect every annotation-backed output first.
+        let links = if extract_links {
+            page.links(&view_box)
+        } else {
+            Vec::new()
+        };
         // Computed when emitted (`extract_content_bounds`) or needed
         // internally by the white-fill heuristic (`extract_vector_graphics`).
         let content_bounds = (output_options.extract_content_bounds
@@ -131,7 +130,6 @@ pub(crate) fn extract_pages_and_images(
         let vector_graphics = output_options
             .extract_vector_graphics
             .then(|| build_vector_graphics(&paths, content_bounds.as_ref()));
-        assign_strikethrough(&mut text_items, &graphics);
         let struct_nodes = extract_page_struct_nodes(&page, &view_box);
         let extracted_refs =
             extract_page_image_refs(&page, page_number, output_options.extract_images);
@@ -195,10 +193,36 @@ pub(crate) fn extract_pages_and_images(
             }
         }
 
+        // PDFium's text API reads only the page content stream. Filled form
+        // values commonly live in widget appearance streams, so flatten the
+        // page's visible annotations in memory and reload before extracting text.
+        // This does not initialize the form environment or execute document JS.
+        let extract_text = |page: &Page| -> Result<Vec<TextItem>, LiteParseError> {
+            let text_page = page.text()?;
+            extract_page_text_items(
+                page,
+                &text_page,
+                &view_box,
+                glyph_resolver,
+                output_options.emit_word_boxes,
+                output_options.extract_text_metadata,
+            )
+        };
+        let mut text_items = if page.has_form_widget_text() && page.flatten_for_display() {
+            flattened_form_widgets = true;
+            drop(page);
+            let flattened_page = document.page(page_index)?;
+            extract_text(&flattened_page)?
+        } else {
+            extract_text(&page)?
+        };
+        assign_links(&mut text_items, &links);
+        assign_strikethrough(&mut text_items, &graphics);
+
         pages.push(LitePage {
             page_number: page_number as usize,
-            page_width: page.width(),
-            page_height: page.height(),
+            page_width,
+            page_height,
             content_bounds: output_options
                 .extract_content_bounds
                 .then_some(content_bounds)
@@ -214,7 +238,7 @@ pub(crate) fn extract_pages_and_images(
         });
     }
 
-    Ok((pages, images, image_error_count))
+    Ok((pages, images, image_error_count, flattened_form_widgets))
 }
 
 #[derive(Debug, Clone, Copy, Default)]

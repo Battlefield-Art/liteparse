@@ -1,5 +1,6 @@
 use std::path::Path;
 
+use liteparse::config::OutputFormat;
 use liteparse::conversion::convert_data_to_pdf;
 use liteparse::ocr_merge::ComplexityReason;
 use liteparse::types::PdfInput;
@@ -284,5 +285,98 @@ async fn test_annotation_text_complexity_reason() {
         page.reasons.contains(&ComplexityReason::AnnotationText),
         "expected annotation-text, got {:?}",
         page.reasons
+    );
+}
+
+/// Filled AcroForm values are visible page content even though PDFium's text
+/// API does not expose widget appearance streams until they are flattened.
+#[tokio::test]
+#[serial]
+async fn test_filled_acroform_values_are_extracted_as_text() {
+    let lit = LiteParse::new(LiteParseConfig {
+        ocr_enabled: false,
+        output_format: OutputFormat::Markdown,
+        ..Default::default()
+    });
+    let parsed = lit
+        .parse("../../integration_tests_data/filled_acroform.pdf")
+        .await
+        .expect("filled form should parse");
+
+    for expected in ["ACROFORM-CUSTOMER-7319", "2026-07-28", "50.00"] {
+        assert_eq!(
+            parsed.text.matches(expected).count(),
+            1,
+            "visible form value should appear exactly once: {expected}"
+        );
+        assert!(
+            parsed.pages[0]
+                .text_items
+                .iter()
+                .any(|item| item.text.contains(expected)),
+            "form value should be a positioned text item: {expected}"
+        );
+    }
+    assert!(
+        !parsed.text.contains("DEFAULT-ONLY-SHOULD-NOT-APPEAR"),
+        "an unpainted default choice must not be treated as a filled value"
+    );
+    assert!(
+        parsed.pages[0].form_fields.is_none(),
+        "default text extraction must not enable structured form metadata"
+    );
+
+    let with_metadata = LiteParse::new(LiteParseConfig {
+        ocr_enabled: false,
+        output_format: OutputFormat::Markdown,
+        extract_annotations: true,
+        extract_form_fields: true,
+        ..Default::default()
+    })
+    .parse("../../integration_tests_data/filled_acroform.pdf")
+    .await
+    .expect("filled form should parse with structured metadata");
+
+    assert_eq!(
+        with_metadata.pages[0].annotations.as_ref().unwrap().len(),
+        5
+    );
+    let fields = with_metadata.pages[0].form_fields.as_ref().unwrap();
+    assert_eq!(fields.len(), 5);
+    assert!(fields.iter().any(|field| {
+        field.name.as_deref() == Some("customer_name")
+            && field.value.as_deref() == Some("ACROFORM-CUSTOMER-7319")
+    }));
+    assert!(fields.iter().any(|field| {
+        field.name.as_deref() == Some("default_only_choice")
+            && field.value.as_deref() == Some("DEFAULT-ONLY-SHOULD-NOT-APPEAR")
+    }));
+    assert_eq!(
+        with_metadata.pages[1].annotations.as_ref().unwrap().len(),
+        1
+    );
+    let second_page_fields = with_metadata.pages[1].form_fields.as_ref().unwrap();
+    assert_eq!(second_page_fields.len(), 1);
+    assert_eq!(
+        second_page_fields[0].name.as_deref(),
+        Some("complexity_sentinel")
+    );
+    assert_eq!(second_page_fields[0].value.as_deref(), Some("OK"));
+
+    let complexity = LiteParse::new(LiteParseConfig {
+        ocr_enabled: false,
+        ..Default::default()
+    })
+    .is_complex(PdfInput::Path(
+        "../../integration_tests_data/filled_acroform.pdf".into(),
+    ))
+    .await
+    .expect("complexity analysis should use an unmodified document");
+    assert_eq!(complexity.len(), 2);
+    assert!(
+        complexity[1]
+            .reasons
+            .contains(&ComplexityReason::AnnotationText),
+        "the pristine second page must retain its widget annotation"
     );
 }

@@ -909,30 +909,45 @@ impl<'doc, 'lib: 'doc> Page<'doc, 'lib> {
                 continue;
             }
             let subtype = unsafe { ffi!(FPDFAnnot_GetSubtype(annot)) };
-            let flags = unsafe { ffi!(FPDFAnnot_GetFlags(annot)) };
-            let hidden = flags & pdfium_sys::FPDF_ANNOT_FLAG_HIDDEN as i32 != 0;
-            let mut found = false;
-            if !hidden && subtype != pdfium_sys::FPDF_ANNOT_POPUP as i32 {
-                let object_count = unsafe { ffi!(FPDFAnnot_GetObjectCount(annot)) };
-                for object_index in 0..object_count {
-                    let object = unsafe { ffi!(FPDFAnnot_GetObject(annot, object_index)) };
-                    if object.is_null() {
-                        continue;
-                    }
-                    if unsafe { ffi!(FPDFPageObj_GetType(object)) }
-                        == pdfium_sys::FPDF_PAGEOBJ_TEXT as i32
-                    {
-                        found = true;
-                        break;
-                    }
-                }
-            }
+            let found =
+                subtype != pdfium_sys::FPDF_ANNOT_POPUP as i32 && annotation_paints_text(annot);
             unsafe { ffi!(FPDFPage_CloseAnnot(annot)) };
             if found {
                 return true;
             }
         }
         false
+    }
+
+    /// Whether a visible AcroForm widget paints text through its appearance.
+    /// PDFium's page text API omits these glyphs until the page is flattened.
+    pub fn has_form_widget_text(&self) -> bool {
+        let count = unsafe { ffi!(FPDFPage_GetAnnotCount(self.handle)) };
+        for index in 0..count {
+            let annot = unsafe { ffi!(FPDFPage_GetAnnot(self.handle, index)) };
+            if annot.is_null() {
+                continue;
+            }
+            let found = unsafe { ffi!(FPDFAnnot_GetSubtype(annot)) }
+                == pdfium_sys::FPDF_ANNOT_WIDGET as i32
+                && annotation_paints_text(annot);
+            unsafe { ffi!(FPDFPage_CloseAnnot(annot)) };
+            if found {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Promote visible annotation and form appearances into page content.
+    /// Returns true only when PDFium changed the page.
+    pub fn flatten_for_display(&self) -> bool {
+        unsafe {
+            ffi!(FPDFPage_Flatten(
+                self.handle,
+                pdfium_sys::FLAT_NORMALDISPLAY as i32
+            )) == pdfium_sys::FLATTEN_SUCCESS as i32
+        }
     }
 
     /// Enumerate AcroForm widget annotations and resolve their field values
@@ -1085,6 +1100,23 @@ impl<'doc, 'lib: 'doc> Page<'doc, 'lib> {
         }
         out
     }
+}
+
+fn annotation_paints_text(annot: pdfium_sys::FPDF_ANNOTATION) -> bool {
+    let flags = unsafe { ffi!(FPDFAnnot_GetFlags(annot)) };
+    let suppressed = pdfium_sys::FPDF_ANNOT_FLAG_INVISIBLE
+        | pdfium_sys::FPDF_ANNOT_FLAG_HIDDEN
+        | pdfium_sys::FPDF_ANNOT_FLAG_NOVIEW;
+    if flags & suppressed as i32 != 0 {
+        return false;
+    }
+
+    let object_count = unsafe { ffi!(FPDFAnnot_GetObjectCount(annot)) };
+    (0..object_count).any(|object_index| {
+        let object = unsafe { ffi!(FPDFAnnot_GetObject(annot, object_index)) };
+        !object.is_null()
+            && unsafe { ffi!(FPDFPageObj_GetType(object)) } == pdfium_sys::FPDF_PAGEOBJ_TEXT as i32
+    })
 }
 
 fn form_field_type_name(field_type: i32) -> &'static str {

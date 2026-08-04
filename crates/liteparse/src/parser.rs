@@ -283,7 +283,7 @@ impl LiteParse {
             let lib = Library::init();
             let document = extract::load_document_from_input(&lib, &validated_input, password)?;
 
-            let (pages, _, _) = extract::extract_pages_and_images(
+            let (pages, _, _, flattened_form_widgets) = extract::extract_pages_and_images(
                 &document,
                 target_pages.as_deref(),
                 self.config.max_pages,
@@ -291,6 +291,13 @@ impl LiteParse {
                 self.glyph_resolver.as_deref(),
                 extract::ExtractionOutputOptions::default(),
             )?;
+            // Form flattening promotes appearances into page content by
+            // mutating the PDFium document. Complexity still needs the
+            // original annotations, so reopen the input when that happened.
+            let pristine_document = flattened_form_widgets
+                .then(|| extract::load_document_from_input(&lib, &validated_input, password))
+                .transpose()?;
+            let complexity_document = pristine_document.as_ref().unwrap_or(&document);
             let t_extract = web_time::Instant::now();
             log(&format!(
                 "[liteparse] extract: {:.1}ms ({} pages)",
@@ -301,7 +308,7 @@ impl LiteParse {
             let page_complexities = pages
                 .iter()
                 .map(|page| {
-                    let page_obj = document.page((page.page_number - 1) as i32)?;
+                    let page_obj = complexity_document.page((page.page_number - 1) as i32)?;
                     ocr_merge::calculate_page_complexity(page, &page_obj)
                 })
                 .collect::<Result<Vec<_>, _>>()?;
@@ -499,28 +506,39 @@ impl LiteParse {
                     .collect::<Vec<_>>()
             });
             let outline = extract::extract_outline(&document);
-            let (pages, images, image_error_count) = extract::extract_pages_and_images(
-                &document,
-                target_pages.as_deref(),
-                self.config.max_pages,
-                self.config.extract_links
-                    && self.config.output_format == crate::config::OutputFormat::Markdown,
-                self.glyph_resolver.as_deref(),
-                extract::ExtractionOutputOptions {
-                    extract_content_bounds: self.config.extract_content_bounds,
-                    extract_images: self.config.effective_extract_images(),
-                    // The markdown table detector splits PDFium's merged
-                    // multi-cell runs on real word geometry, so it needs word
-                    // boxes even when the caller didn't ask for them.
-                    emit_word_boxes: self.config.emit_word_boxes
-                        || self.config.output_format == crate::config::OutputFormat::Markdown,
-                    extract_text_metadata: self.config.extract_text_metadata,
-                    extract_vector_graphics: self.config.extract_vector_graphics,
-                    extract_annotations: self.config.extract_annotations,
-                    extract_form_fields: self.config.extract_form_fields,
-                    extract_structure_tree: self.config.extract_structure_tree,
-                },
-            )?;
+            let (pages, images, image_error_count, flattened_form_widgets) =
+                extract::extract_pages_and_images(
+                    &document,
+                    target_pages.as_deref(),
+                    self.config.max_pages,
+                    self.config.extract_links
+                        && self.config.output_format == crate::config::OutputFormat::Markdown,
+                    self.glyph_resolver.as_deref(),
+                    extract::ExtractionOutputOptions {
+                        extract_content_bounds: self.config.extract_content_bounds,
+                        extract_images: self.config.effective_extract_images(),
+                        // The markdown table detector splits PDFium's merged
+                        // multi-cell runs on real word geometry, so it needs word
+                        // boxes even when the caller didn't ask for them.
+                        emit_word_boxes: self.config.emit_word_boxes
+                            || self.config.output_format == crate::config::OutputFormat::Markdown,
+                        extract_text_metadata: self.config.extract_text_metadata,
+                        extract_vector_graphics: self.config.extract_vector_graphics,
+                        extract_annotations: self.config.extract_annotations,
+                        extract_form_fields: self.config.extract_form_fields,
+                        extract_structure_tree: self.config.extract_structure_tree,
+                    },
+                )?;
+            // Flattening is deliberately limited to text extraction. OCR and
+            // complexity must retain the original annotations/widgets so the
+            // opt-in form renderer can still run document actions and paint
+            // computed field appearances.
+            let needs_pristine_document = flattened_form_widgets
+                && (self.config.ocr_enabled || self.config.include_complexity);
+            let pristine_document = needs_pristine_document
+                .then(|| extract::load_document_from_input(&lib, document_input, password))
+                .transpose()?;
+            let analysis_document = pristine_document.as_ref().unwrap_or(&document);
             let t_extract = web_time::Instant::now();
             log(&format!(
                 "[liteparse] extract: {:.1}ms ({} pages)",
@@ -529,7 +547,7 @@ impl LiteParse {
             ));
             let rendered = if self.config.ocr_enabled {
                 let r = ocr_merge::render_pages_for_ocr(
-                    &document,
+                    analysis_document,
                     &pages,
                     self.config.dpi,
                     ocr_grayscale,
@@ -552,7 +570,7 @@ impl LiteParse {
                 pages
                     .iter()
                     .map(|page| {
-                        let page_obj = document.page((page.page_number - 1) as i32)?;
+                        let page_obj = analysis_document.page((page.page_number - 1) as i32)?;
                         ocr_merge::calculate_page_complexity(page, &page_obj)
                     })
                     .collect::<Result<Vec<_>, _>>()?

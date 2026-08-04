@@ -99,6 +99,11 @@ pub const FPDF_FORMFIELD_LISTBOX: u32 = 5;
 pub const FPDF_FORMFIELD_TEXTFIELD: u32 = 6;
 pub const FPDF_FORMFIELD_SIGNATURE: u32 = 7;
 pub const FPDF_FORMFIELD_COUNT: u32 = 8;
+pub const FLATTEN_FAIL: u32 = 0;
+pub const FLATTEN_SUCCESS: u32 = 1;
+pub const FLATTEN_NOTHINGTODO: u32 = 2;
+pub const FLAT_NORMALDISPLAY: u32 = 0;
+pub const FLAT_PRINT: u32 = 1;
 pub const FPDF_ANNOT_UNKNOWN: u32 = 0;
 pub const FPDF_ANNOT_TEXT: u32 = 1;
 pub const FPDF_ANNOT_LINK: u32 = 2;
@@ -1054,6 +1059,12 @@ pub struct FPDF_IMAGEOBJ_METADATA {
     pub bits_per_pixel: ::std::os::raw::c_uint,
     pub colorspace: ::std::os::raw::c_int,
     pub marked_content_id: ::std::os::raw::c_int,
+}
+unsafe extern "C" {
+    pub fn FPDFPage_Flatten(
+        page: FPDF_PAGE,
+        nFlag: ::std::os::raw::c_int,
+    ) -> ::std::os::raw::c_int;
 }
 unsafe extern "C" {
     pub fn FPDF_CreateNewDocument() -> FPDF_DOCUMENT;
