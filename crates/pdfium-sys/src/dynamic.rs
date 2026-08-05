@@ -117,7 +117,7 @@ pub struct PdfiumBindings {
     pub FPDF_GetPageBoundingBox: unsafe extern "C" fn(FPDF_PAGE, *mut FS_RECTF) -> FPDF_BOOL,
     pub FPDFPage_GetRotation: unsafe extern "C" fn(FPDF_PAGE) -> std::os::raw::c_int,
     pub FPDFPage_Flatten:
-        unsafe extern "C" fn(FPDF_PAGE, std::os::raw::c_int) -> std::os::raw::c_int,
+        Option<unsafe extern "C" fn(FPDF_PAGE, std::os::raw::c_int) -> std::os::raw::c_int>,
     pub FPDF_PageToDevice: unsafe extern "C" fn(
         FPDF_PAGE,
         std::os::raw::c_int,
@@ -396,7 +396,8 @@ pub struct PdfiumBindings {
         unsafe extern "C" fn(FPDF_ANNOTATION, FPDF_BYTESTRING) -> FPDF_ANNOTATION,
     pub FPDFAnnot_GetObjNum: unsafe extern "C" fn(FPDF_ANNOTATION) -> std::os::raw::c_int,
     pub FPDFAnnot_GetFlags: unsafe extern "C" fn(FPDF_ANNOTATION) -> std::os::raw::c_int,
-    pub FPDFAnnot_SetFlags: unsafe extern "C" fn(FPDF_ANNOTATION, std::os::raw::c_int) -> FPDF_BOOL,
+    pub FPDFAnnot_SetFlags:
+        Option<unsafe extern "C" fn(FPDF_ANNOTATION, std::os::raw::c_int) -> FPDF_BOOL>,
     pub FPDFAnnot_GetObjectCount: unsafe extern "C" fn(FPDF_ANNOTATION) -> std::os::raw::c_int,
     pub FPDFAnnot_GetObject:
         unsafe extern "C" fn(FPDF_ANNOTATION, std::os::raw::c_int) -> FPDF_PAGEOBJECT,
@@ -573,7 +574,7 @@ impl PdfiumBindings {
             FPDF_GetPageHeightF: load_fn!(lib, "FPDF_GetPageHeightF"),
             FPDF_GetPageBoundingBox: load_fn!(lib, "FPDF_GetPageBoundingBox"),
             FPDFPage_GetRotation: load_fn!(lib, "FPDFPage_GetRotation"),
-            FPDFPage_Flatten: load_fn!(lib, "FPDFPage_Flatten"),
+            FPDFPage_Flatten: load_fn_opt!(lib, "FPDFPage_Flatten"),
             FPDF_PageToDevice: load_fn!(lib, "FPDF_PageToDevice"),
             FPDFPage_CountObjects: load_fn!(lib, "FPDFPage_CountObjects"),
             FPDFPage_GetObject: load_fn!(lib, "FPDFPage_GetObject"),
@@ -671,7 +672,7 @@ impl PdfiumBindings {
             FPDFAnnot_GetLinkedAnnot: load_fn!(lib, "FPDFAnnot_GetLinkedAnnot"),
             FPDFAnnot_GetObjNum: load_fn!(lib, "FPDFAnnot_GetObjNum"),
             FPDFAnnot_GetFlags: load_fn!(lib, "FPDFAnnot_GetFlags"),
-            FPDFAnnot_SetFlags: load_fn!(lib, "FPDFAnnot_SetFlags"),
+            FPDFAnnot_SetFlags: load_fn_opt!(lib, "FPDFAnnot_SetFlags"),
             FPDFAnnot_GetObjectCount: load_fn!(lib, "FPDFAnnot_GetObjectCount"),
             FPDFAnnot_GetObject: load_fn!(lib, "FPDFAnnot_GetObject"),
             FPDFAnnot_GetFormFieldFlags: load_fn!(lib, "FPDFAnnot_GetFormFieldFlags"),

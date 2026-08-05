@@ -59,15 +59,25 @@ pub(crate) fn extract_pages_from_document(
         None,
         ExtractionOutputOptions::default(),
     )?
-    .0)
+    .pages)
+}
+
+/// Output of [`extract_pages_and_images`].
+pub(crate) struct ExtractedPages {
+    pub pages: Vec<LitePage>,
+    /// Empty unless `output_options.extract_images` was set.
+    pub images: Vec<ExtractedImage>,
+    pub image_error_count: u32,
+    /// Whether any page was flattened to recover form-widget text. Flattening
+    /// mutates the open PDFium document, so a caller that still needs the
+    /// original widget annotations must reopen the input.
+    pub flattened_form_widgets: bool,
 }
 
 /// Same as `extract_pages_from_document` but optionally also renders every
 /// raster image object to bytes (when `output_options.extract_images` is true). Returned
 /// `ExtractedImage`s carry the same ids the markdown emitter will reference,
-/// so callers can match them up by id. When image extraction is disabled the
-/// returned image vec is always empty. The final boolean reports whether a
-/// page was flattened, which mutates the open PDFium document.
+/// so callers can match them up by id.
 pub(crate) fn extract_pages_and_images(
     document: &Document,
     target_pages: Option<&[u32]>,
@@ -75,13 +85,16 @@ pub(crate) fn extract_pages_and_images(
     extract_links: bool,
     glyph_resolver: Option<&dyn crate::GlyphResolver>,
     output_options: ExtractionOutputOptions,
-) -> Result<(Vec<LitePage>, Vec<ExtractedImage>, u32, bool), LiteParseError> {
+) -> Result<ExtractedPages, LiteParseError> {
     let page_count = document.page_count();
     let mut pages = Vec::new();
     let mut images: Vec<ExtractedImage> = Vec::new();
     let mut image_cache = ImageCache::default();
     let mut image_error_count = 0u32;
     let mut flattened_form_widgets = false;
+    // One FFI call keeps the per-page annotation walk off the hot path for
+    // every document without an AcroForm catalog, which is nearly all of them.
+    let document_has_form = document.form_type() != 0;
     let form_environment = output_options
         .extract_form_fields
         .then(|| document.form_environment())
@@ -198,6 +211,10 @@ pub(crate) fn extract_pages_and_images(
         // those widget appearances into page content and reload before text
         // extraction. Non-widget annotations are excluded, and this does not
         // initialize the form environment or execute document JS.
+        //
+        // `widget_text_rects` is empty for the overwhelming majority of pages —
+        // documents with no AcroForm catalog never even reach the annotation
+        // walk — so the whole path costs one `form_type()` call for most files.
         let extract_text = |page: &Page| -> Result<Vec<TextItem>, LiteParseError> {
             let text_page = page.text()?;
             extract_page_text_items(
@@ -209,15 +226,37 @@ pub(crate) fn extract_pages_and_images(
                 output_options.extract_text_metadata,
             )
         };
-        let mut text_items =
-            if page.has_form_widget_text() && page.flatten_form_widgets_for_display() {
-                flattened_form_widgets = true;
-                drop(page);
-                let flattened_page = document.page(page_index)?;
-                extract_text(&flattened_page)?
-            } else {
-                extract_text(&page)?
-            };
+        let widget_text_rects = if document_has_form {
+            page.form_widget_text_rects(&view_box)
+        } else {
+            Vec::new()
+        };
+        let mut text_items = if widget_text_rects.is_empty() {
+            extract_text(&page)?
+        } else {
+            // PDFium's text layer keeps only one of two runs that start at
+            // essentially the same point, so a flattened appearance can
+            // suppress page text it lands on. Usually widget rects sit over
+            // blank space, and this bounds-only probe says so without touching
+            // the text API; only when a widget really does cover existing text
+            // do we extract twice and put back what was suppressed.
+            let overlaps_existing_text = page.text_objects_overlap(&view_box, &widget_text_rects);
+            let before = overlaps_existing_text
+                .then(|| extract_text(&page))
+                .transpose()?;
+            drop(page);
+            match document.flatten_form_widgets(page_index)? {
+                Some(flattened_page) => {
+                    flattened_form_widgets = true;
+                    let mut items = extract_text(&flattened_page)?;
+                    if let Some(before) = before {
+                        restore_flattened_over_text(&mut items, before, &widget_text_rects);
+                    }
+                    items
+                }
+                None => extract_text(&document.page(page_index)?)?,
+            }
+        };
         assign_links(&mut text_items, &links);
         assign_strikethrough(&mut text_items, &graphics);
 
@@ -240,7 +279,60 @@ pub(crate) fn extract_pages_and_images(
         });
     }
 
-    Ok((pages, images, image_error_count, flattened_form_widgets))
+    Ok(ExtractedPages {
+        pages,
+        images,
+        image_error_count,
+        flattened_form_widgets,
+    })
+}
+
+/// Put back page text that flattening suppressed.
+///
+/// PDFium's text layer emits only one of two text runs that start at
+/// essentially the same point, so a flattened widget appearance can knock out
+/// page text it lands on. When the two carry the *same* string — a producer
+/// that wrote the value into both the content stream and the appearance — that
+/// is precisely the dedup a partially flattened file needs, and matching on
+/// trimmed text leaves it alone. When they differ, such as a pre-printed label
+/// sitting where the value is typed, dropping one is pure data loss, so the
+/// pre-flatten copy is restored.
+///
+/// Only called for the page where a widget rect actually covers existing text;
+/// `before` is the pre-flatten extraction of the same page.
+///
+/// Note this recovers one direction only. If the collision goes the other way
+/// PDFium can suppress the *appearance* text instead, and the field value is
+/// lost with no pre-flatten copy to restore it from.
+fn restore_flattened_over_text(
+    items: &mut Vec<TextItem>,
+    before: Vec<TextItem>,
+    widget_rects: &[RectF],
+) {
+    let surviving: std::collections::HashSet<&str> = items
+        .iter()
+        .map(|item| item.text.trim())
+        .filter(|text| !text.is_empty())
+        .collect();
+    let mut restored: Vec<TextItem> = before
+        .iter()
+        .filter(|item| {
+            let text = item.text.trim();
+            !text.is_empty()
+                && !surviving.contains(text)
+                && widget_rects
+                    .iter()
+                    .any(|rect| rect_contains_center(rect, item))
+        })
+        .cloned()
+        .collect();
+    items.append(&mut restored);
+}
+
+fn rect_contains_center(rect: &RectF, item: &TextItem) -> bool {
+    let cx = item.x + item.width / 2.0;
+    let cy = item.y + item.height / 2.0;
+    cx >= rect.left && cx <= rect.right && cy >= rect.top && cy <= rect.bottom
 }
 
 #[derive(Debug, Clone, Copy, Default)]
