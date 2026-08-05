@@ -138,6 +138,24 @@ impl<'lib> Document<'lib> {
         })
     }
 
+    /// Flatten the visible form-widget appearances on `index` into the page
+    /// content stream and hand back a freshly loaded page reflecting them.
+    ///
+    /// Flattening mutates this document in place and invalidates the page
+    /// handle it ran on, so the load/flatten/reload sequence lives here rather
+    /// than at call sites where a stale handle would be easy to keep using.
+    /// Returns `Ok(None)` when nothing was flattened — the caller should keep
+    /// using its existing page.
+    pub fn flatten_form_widgets(&self, index: i32) -> Result<Option<Page<'_, 'lib>>, PdfiumError> {
+        {
+            let page = self.page(index)?;
+            if !page.flatten_form_widgets_for_display() {
+                return Ok(None);
+            }
+        }
+        self.page(index).map(Some)
+    }
+
     /// Read one entry from the document's `/Info` metadata dictionary
     /// (e.g. `"Creator"`, `"Producer"`, `"Title"`). Returns `None` when the
     /// tag is absent or empty.

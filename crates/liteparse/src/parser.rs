@@ -283,14 +283,21 @@ impl LiteParse {
             let lib = Library::init();
             let document = extract::load_document_from_input(&lib, &validated_input, password)?;
 
-            let (pages, _, _) = extract::extract_pages_and_images(
+            // Complexity deliberately runs against the flattened document: once
+            // widget text lives in the content stream it is genuinely within
+            // PDFium's reach, so it should count toward the page's text budget
+            // instead of routing the page to OCR to recover text we already
+            // have. `AnnotationText` still fires for the non-widget appearance
+            // text it was introduced for.
+            let pages = extract::extract_pages_and_images(
                 &document,
                 target_pages.as_deref(),
                 self.config.max_pages,
                 false, // extract_links: irrelevant for complexity stats
                 self.glyph_resolver.as_deref(),
                 extract::ExtractionOutputOptions::default(),
-            )?;
+            )?
+            .pages;
             let t_extract = web_time::Instant::now();
             log(&format!(
                 "[liteparse] extract: {:.1}ms ({} pages)",
@@ -499,7 +506,7 @@ impl LiteParse {
                     .collect::<Vec<_>>()
             });
             let outline = extract::extract_outline(&document);
-            let (pages, images, image_error_count) = extract::extract_pages_and_images(
+            let extracted = extract::extract_pages_and_images(
                 &document,
                 target_pages.as_deref(),
                 self.config.max_pages,
@@ -521,6 +528,28 @@ impl LiteParse {
                     extract_structure_tree: self.config.extract_structure_tree,
                 },
             )?;
+            let extract::ExtractedPages {
+                pages,
+                images,
+                image_error_count,
+                flattened_form_widgets,
+            } = extracted;
+            // Reopening the input costs a full parse, so it is confined to the
+            // one consumer that genuinely needs live widget annotations: the
+            // opt-in form renderer, which initializes the form environment to
+            // run document actions and paint computed field appearances that
+            // have no appearance stream to flatten.
+            //
+            // Plain OCR rendering does not need it — flattening promotes the
+            // widget appearances into page content, so the raster is the same
+            // either way. Complexity likewise runs on the flattened document
+            // by design (see `is_complex`).
+            let needs_pristine_document =
+                flattened_form_widgets && self.config.ocr_enabled && self.config.render_form_fields;
+            let pristine_document = needs_pristine_document
+                .then(|| extract::load_document_from_input(&lib, document_input, password))
+                .transpose()?;
+            let analysis_document = pristine_document.as_ref().unwrap_or(&document);
             let t_extract = web_time::Instant::now();
             log(&format!(
                 "[liteparse] extract: {:.1}ms ({} pages)",
@@ -529,7 +558,7 @@ impl LiteParse {
             ));
             let rendered = if self.config.ocr_enabled {
                 let r = ocr_merge::render_pages_for_ocr(
-                    &document,
+                    analysis_document,
                     &pages,
                     self.config.dpi,
                     ocr_grayscale,
@@ -552,7 +581,7 @@ impl LiteParse {
                 pages
                     .iter()
                     .map(|page| {
-                        let page_obj = document.page((page.page_number - 1) as i32)?;
+                        let page_obj = analysis_document.page((page.page_number - 1) as i32)?;
                         ocr_merge::calculate_page_complexity(page, &page_obj)
                     })
                     .collect::<Result<Vec<_>, _>>()?

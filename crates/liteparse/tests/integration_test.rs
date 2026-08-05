@@ -1,5 +1,6 @@
 use std::path::Path;
 
+use liteparse::config::OutputFormat;
 use liteparse::conversion::convert_data_to_pdf;
 use liteparse::ocr_merge::ComplexityReason;
 use liteparse::types::PdfInput;
@@ -284,5 +285,156 @@ async fn test_annotation_text_complexity_reason() {
         page.reasons.contains(&ComplexityReason::AnnotationText),
         "expected annotation-text, got {:?}",
         page.reasons
+    );
+}
+
+/// Filled AcroForm values are visible page content even though PDFium's text
+/// API does not expose widget appearance streams until they are flattened.
+#[tokio::test]
+#[serial]
+async fn test_filled_acroform_values_are_extracted_as_text() {
+    let lit = LiteParse::new(LiteParseConfig {
+        ocr_enabled: false,
+        output_format: OutputFormat::Markdown,
+        ..Default::default()
+    });
+    let parsed = lit
+        .parse("../../integration_tests_data/filled_acroform.pdf")
+        .await
+        .expect("filled form should parse");
+
+    // See scripts/generate_filled_acroform_fixture.py for what each widget
+    // is meant to exercise.
+    for (expected, case) in [
+        (
+            "ACROFORM-CUSTOMER-7319",
+            "painted directly by the appearance",
+        ),
+        ("2026-07-28", "painted through a nested form XObject"),
+        ("50.00", "painted by the appearance and the content stream"),
+    ] {
+        assert_eq!(
+            parsed.text.matches(expected).count(),
+            1,
+            "visible form value should appear exactly once ({case}): {expected}"
+        );
+        assert!(
+            parsed.pages[0]
+                .text_items
+                .iter()
+                .any(|item| item.text.contains(expected)),
+            "form value should be a positioned text item ({case}): {expected}"
+        );
+    }
+    assert!(
+        !parsed.text.contains("DEFAULT-ONLY-SHOULD-NOT-APPEAR"),
+        "an unpainted default choice must not be treated as a filled value"
+    );
+    assert!(
+        !parsed.text.contains("ANNOTATION-ONLY-SHOULD-NOT-APPEAR"),
+        "non-widget annotation appearances must not become page text"
+    );
+    assert!(
+        !parsed.text.contains("HIDDEN-SHOULD-NOT-APPEAR"),
+        "a hidden widget is never rendered, so its value is not visible text"
+    );
+    // Flattening replaces the page content under a widget rect with that
+    // widget's appearance, so page text drawn there is dropped unless it is
+    // put back. This label sits inside the `amount` rect and no appearance
+    // reproduces it.
+    assert_eq!(
+        parsed.text.matches("PREPRINTED-LABEL").count(),
+        1,
+        "page text under a widget rect must survive flattening exactly once"
+    );
+    assert!(
+        parsed.pages[0].form_fields.is_none(),
+        "default text extraction must not enable structured form metadata"
+    );
+    // Page 3's only annotation paints its value through a nested form XObject.
+    // Nothing else on that page would trigger a flatten, so this fails unless
+    // the appearance walk descends into form objects.
+    assert!(
+        parsed.pages[2]
+            .text_items
+            .iter()
+            .any(|item| item.text.contains("NESTED-ONLY-VALUE")),
+        "a widget whose value is painted only through a nested form XObject \
+         must still be detected and flattened"
+    );
+
+    let with_metadata = LiteParse::new(LiteParseConfig {
+        ocr_enabled: false,
+        output_format: OutputFormat::Markdown,
+        extract_annotations: true,
+        extract_form_fields: true,
+        ..Default::default()
+    })
+    .parse("../../integration_tests_data/filled_acroform.pdf")
+    .await
+    .expect("filled form should parse with structured metadata");
+
+    assert_eq!(
+        with_metadata.pages[0].annotations.as_ref().unwrap().len(),
+        6
+    );
+    assert!(
+        with_metadata.pages[0]
+            .annotations
+            .as_ref()
+            .unwrap()
+            .iter()
+            .any(|annotation| {
+                annotation.subtype == "freetext"
+                    && annotation.contents.as_deref() == Some("ANNOTATION-ONLY-SHOULD-NOT-APPEAR")
+            }),
+        "non-widget annotation metadata should remain available when requested"
+    );
+    let fields = with_metadata.pages[0].form_fields.as_ref().unwrap();
+    assert_eq!(fields.len(), 5);
+    assert!(fields.iter().any(|field| {
+        field.name.as_deref() == Some("customer_name")
+            && field.value.as_deref() == Some("ACROFORM-CUSTOMER-7319")
+    }));
+    assert!(fields.iter().any(|field| {
+        field.name.as_deref() == Some("default_only_choice")
+            && field.value.as_deref() == Some("DEFAULT-ONLY-SHOULD-NOT-APPEAR")
+    }));
+    assert_eq!(
+        with_metadata.pages[1].annotations.as_ref().unwrap().len(),
+        1
+    );
+    let second_page_fields = with_metadata.pages[1].form_fields.as_ref().unwrap();
+    assert_eq!(second_page_fields.len(), 1);
+    assert_eq!(
+        second_page_fields[0].name.as_deref(),
+        Some("complexity_sentinel")
+    );
+    assert_eq!(second_page_fields[0].value.as_deref(), Some("OK"));
+    let third_page_fields = with_metadata.pages[2].form_fields.as_ref().unwrap();
+    assert_eq!(third_page_fields.len(), 1);
+    assert_eq!(third_page_fields[0].name.as_deref(), Some("nested_only"));
+
+    // Complexity sees the flattened text. `AnnotationText` means "the text is
+    // there, just outside the extractable surface" — once a widget value has
+    // been promoted into page content that no longer holds, so the reason must
+    // not fire and the page must not be routed to OCR to recover text the
+    // parser already returned. `test_annotation_text_complexity_reason` covers
+    // the non-widget appearance text the reason still exists for.
+    let complexity = LiteParse::new(LiteParseConfig {
+        ocr_enabled: false,
+        ..Default::default()
+    })
+    .is_complex(PdfInput::Path(
+        "../../integration_tests_data/filled_acroform.pdf".into(),
+    ))
+    .await
+    .expect("complexity analysis should run on the flattened document");
+    assert_eq!(complexity.len(), 3);
+    assert!(
+        !complexity[1]
+            .reasons
+            .contains(&ComplexityReason::AnnotationText),
+        "widget text is extractable after flattening, so it is not annotation-only text"
     );
 }

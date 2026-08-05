@@ -277,6 +277,7 @@ fn run_bindgen(include_dir: &Path) {
             .allowlist_type("FPDF.*")
             .allowlist_type("FS_.*")
             .allowlist_var("FPDF.*")
+            .allowlist_var("FLAT.*")
             .derive_debug(true)
             .derive_default(true)
             .layout_tests(false)
