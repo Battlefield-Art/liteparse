@@ -49,7 +49,7 @@ pub fn render_pages_to_png(
     )
 }
 
-fn render_document_pages(
+pub(crate) fn render_document_pages(
     document: &pdfium::Document,
     page_numbers: Option<&[u32]>,
     dpi: f32,

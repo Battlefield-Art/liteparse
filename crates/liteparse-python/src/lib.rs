@@ -603,6 +603,8 @@ struct PyParseResult {
     #[pyo3(get)]
     images: Vec<PyExtractedImage>,
     #[pyo3(get)]
+    screenshots: Vec<PyScreenshotResult>,
+    #[pyo3(get)]
     image_error_count: u32,
     #[pyo3(get)]
     form_type: Option<i32>,
@@ -728,6 +730,11 @@ impl PyParseResult {
                 .images
                 .into_iter()
                 .map(PyExtractedImage::from_rust)
+                .collect(),
+            screenshots: result
+                .screenshots
+                .into_iter()
+                .map(PyScreenshotResult::from_rust)
                 .collect(),
             image_error_count: result.image_error_count,
             form_type: result.form_type,
@@ -871,6 +878,30 @@ impl PyScreenshotRect {
             "ScreenshotRect(x={}, y={}, width={}, height={}, color={}, is_line={})",
             self.x, self.y, self.width, self.height, self.color, self.is_line
         )
+    }
+}
+
+impl PyScreenshotResult {
+    fn from_rust(result: liteparse::parser::ScreenshotResult) -> Self {
+        Self {
+            page_num: result.page_num,
+            width: result.width,
+            height: result.height,
+            image_buffer: result.image_bytes,
+            is_solid_fill: result.is_solid_fill,
+            rects: result
+                .rects
+                .into_iter()
+                .map(|rect| PyScreenshotRect {
+                    x: rect.x as f64,
+                    y: rect.y as f64,
+                    width: rect.width as f64,
+                    height: rect.height as f64,
+                    color: rect.color,
+                    is_line: rect.is_line,
+                })
+                .collect(),
+        }
     }
 }
 
@@ -1044,6 +1075,8 @@ struct PyLiteParseConfig {
     #[pyo3(get)]
     target_pages: Option<String>,
     #[pyo3(get)]
+    extract_screenshots: bool,
+    #[pyo3(get)]
     dpi: f32,
     #[pyo3(get)]
     output_format: String,
@@ -1123,6 +1156,7 @@ impl PyLiteParseConfig {
             tessdata_path: cfg.tessdata_path.clone(),
             max_pages: cfg.max_pages,
             target_pages: cfg.target_pages.clone(),
+            extract_screenshots: cfg.extract_screenshots,
             dpi: cfg.dpi,
             output_format: match cfg.output_format {
                 OutputFormat::Json => "json".to_string(),
@@ -1188,6 +1222,7 @@ impl LiteParse {
         tessdata_path = None,
         max_pages = None,
         target_pages = None,
+        extract_screenshots = None,
         dpi = None,
         output_format = None,
         preserve_very_small_text = None,
@@ -1224,6 +1259,7 @@ impl LiteParse {
         tessdata_path: Option<String>,
         max_pages: Option<usize>,
         target_pages: Option<String>,
+        extract_screenshots: Option<bool>,
         dpi: Option<f32>,
         output_format: Option<String>,
         preserve_very_small_text: Option<bool>,
@@ -1273,6 +1309,9 @@ impl LiteParse {
         }
         if let Some(v) = target_pages {
             cfg.target_pages = Some(v);
+        }
+        if let Some(v) = extract_screenshots {
+            cfg.extract_screenshots = v;
         }
         if let Some(v) = dpi {
             cfg.dpi = v;

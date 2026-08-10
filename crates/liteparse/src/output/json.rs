@@ -391,6 +391,7 @@ mod tests {
             text: String::new(),
             outline: vec![],
             images: vec![image],
+            screenshots: vec![],
             image_error_count: 2,
             form_type: None,
             creator: Some("LibreOffice".into()),

@@ -55,6 +55,7 @@ const parser = new LiteParse({
   tessdataPath: undefined,       // Path to tessdata directory (optional)
   maxPages: 1000,                // Max pages to parse
   targetPages: '1-5,10',        // Specific pages (optional)
+  extractScreenshots: false,    // Return parsed pages as PNG buffers
   dpi: 150,                      // Rendering DPI
   outputFormat: 'json',          // "json" | "text" | "markdown"
   imageMode: 'placeholder',      // Markdown image handling: "placeholder" | "off" | "embed"

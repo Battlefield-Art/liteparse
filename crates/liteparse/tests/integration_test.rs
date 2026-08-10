@@ -40,6 +40,31 @@ async fn test_screenshot_pdf_integration() {
 }
 
 #[tokio::test]
+#[serial]
+async fn test_parse_can_return_screenshots() {
+    let lit = LiteParse::new(LiteParseConfig {
+        ocr_enabled: false,
+        extract_screenshots: true,
+        ..LiteParseConfig::default()
+    });
+    let parsed = lit
+        .parse("../../integration_tests_data/sample.pdf")
+        .await
+        .expect("Should parse and render PDF pages");
+
+    assert_eq!(parsed.screenshots.len(), parsed.pages.len());
+    assert_eq!(
+        parsed.screenshots[0].page_num,
+        parsed.pages[0].page_number as u32
+    );
+    assert!(
+        parsed.screenshots[0]
+            .image_bytes
+            .starts_with(b"\x89PNG\r\n\x1a\n")
+    );
+}
+
+#[tokio::test]
 async fn test_screenshot_rejects_text_file() {
     let dir = tempfile::tempdir().unwrap();
     let txt_path = dir.path().join("notes.txt");

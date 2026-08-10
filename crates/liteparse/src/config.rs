@@ -19,6 +19,10 @@ pub struct LiteParseConfig {
     pub max_pages: usize,
     /// Specific pages to parse (e.g., "1-5,10,15-20"). None means all pages.
     pub target_pages: Option<String>,
+    /// Render parsed pages to PNG and return them in `ParseResult.screenshots`.
+    /// Default `false`; PNG payloads can be large.
+    #[serde(default)]
+    pub extract_screenshots: bool,
     /// DPI for rendering pages (used for OCR and screenshots).
     pub dpi: f32,
     /// Output format.
@@ -213,6 +217,7 @@ impl Default for LiteParseConfig {
             tessdata_path: None,
             max_pages: 1000,
             target_pages: None,
+            extract_screenshots: false,
             dpi: 150.0,
             output_format: OutputFormat::Json,
             preserve_very_small_text: false,
@@ -353,6 +358,7 @@ mod tests {
         // OCR defaults on only when a built-in engine is compiled in.
         assert_eq!(c.ocr_enabled, cfg!(feature = "tesseract"));
         assert_eq!(c.max_pages, 1000);
+        assert!(!c.extract_screenshots);
         assert_eq!(c.dpi, 150.0);
         assert_eq!(c.output_format, OutputFormat::Json);
         assert!(!c.preserve_very_small_text);

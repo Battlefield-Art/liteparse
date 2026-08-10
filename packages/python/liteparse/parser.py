@@ -340,6 +340,27 @@ def _convert_native_result(native_result: Any) -> ParseResult:
         pages=pages,
         text=native_result.text,
         images=images,
+        screenshots=[
+            ScreenshotResult(
+                page_num=screenshot.page_num,
+                width=screenshot.width,
+                height=screenshot.height,
+                image_bytes=screenshot.image_bytes,
+                is_solid_fill=getattr(screenshot, "is_solid_fill", False),
+                rects=[
+                    ScreenshotRect(
+                        x=rect.x,
+                        y=rect.y,
+                        width=rect.width,
+                        height=rect.height,
+                        color=rect.color,
+                        is_line=rect.is_line,
+                    )
+                    for rect in getattr(screenshot, "rects", [])
+                ],
+            )
+            for screenshot in getattr(native_result, "screenshots", [])
+        ],
         image_error_count=getattr(native_result, "image_error_count", 0),
         form_type=getattr(native_result, "form_type", None),
         creator=getattr(native_result, "creator", None),
@@ -384,6 +405,7 @@ class LiteParse:
         tessdata_path: Optional[str] = None,
         max_pages: Optional[int] = None,
         target_pages: Optional[str] = None,
+        extract_screenshots: Optional[bool] = None,
         dpi: Optional[float] = None,
         output_format: Optional[str] = None,
         preserve_very_small_text: Optional[bool] = None,
@@ -424,6 +446,8 @@ class LiteParse:
             tessdata_path: Path to tessdata directory for Tesseract
             max_pages: Maximum number of pages to parse
             target_pages: Specific pages to parse (e.g., "1-5,10,15-20")
+            extract_screenshots: Render parsed pages to PNG and return them in
+                ``ParseResult.screenshots``. Default False; PNG payloads can be large.
             dpi: DPI for rendering (affects OCR quality)
             output_format: Output format: "json", "text", or "markdown" (default: "json")
             preserve_very_small_text: Whether to preserve very small text
@@ -497,6 +521,8 @@ class LiteParse:
             kwargs["max_pages"] = max_pages
         if target_pages is not None:
             kwargs["target_pages"] = target_pages
+        if extract_screenshots is not None:
+            kwargs["extract_screenshots"] = extract_screenshots
         if dpi is not None:
             kwargs["dpi"] = dpi
         if output_format is not None:
@@ -689,6 +715,7 @@ class LiteParse:
             tessdata_path=cfg.tessdata_path,
             max_pages=cfg.max_pages,
             target_pages=cfg.target_pages,
+            extract_screenshots=cfg.extract_screenshots,
             dpi=cfg.dpi,
             output_format=cfg.output_format,
             preserve_very_small_text=cfg.preserve_very_small_text,
