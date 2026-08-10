@@ -244,6 +244,15 @@ pub struct Page {
     pub structure_tree: Option<StructureTree>,
 }
 
+/// A page that could not be extracted while tolerant page errors were enabled.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct PageError {
+    /// Source page number (1-indexed).
+    pub page_number: u32,
+    /// Human-readable extraction failure.
+    pub message: String,
+}
+
 /// One PDF page annotation. Coordinates use the same top-left, 72-DPI
 /// viewport space as [`TextItem`].
 #[derive(Debug, Clone, Serialize)]

@@ -32,6 +32,9 @@ pub struct JsLiteParseConfig {
     pub max_pages: Option<u32>,
     /// Specific pages to parse (e.g., "1-5,10,15-20").
     pub target_pages: Option<String>,
+    /// Continue after page-level extraction failures and return them in
+    /// `ParseResult.pageErrors`. Default false.
+    pub continue_on_page_error: Option<bool>,
     /// DPI for rendering pages (used for OCR and screenshots).
     pub dpi: Option<f64>,
     /// Output format: "json", "text", or "markdown".
@@ -145,6 +148,9 @@ impl JsLiteParseConfig {
         if let Some(v) = self.target_pages {
             cfg.target_pages = Some(v);
         }
+        if let Some(v) = self.continue_on_page_error {
+            cfg.continue_on_page_error = v;
+        }
         if let Some(v) = self.dpi {
             cfg.dpi = v as f32;
         }
@@ -255,6 +261,7 @@ impl JsLiteParseConfig {
             tessdata_path: cfg.tessdata_path.clone(),
             max_pages: Some(cfg.max_pages as u32),
             target_pages: cfg.target_pages.clone(),
+            continue_on_page_error: Some(cfg.continue_on_page_error),
             dpi: Some(cfg.dpi as f64),
             output_format: Some(match cfg.output_format {
                 OutputFormat::Json => "json".to_string(),
@@ -882,6 +889,7 @@ impl JsParsedPage {
 #[derive(Clone)]
 pub struct JsParseResult {
     pub pages: Vec<JsParsedPage>,
+    pub page_errors: Vec<JsPageError>,
     pub text: String,
     pub images: Vec<JsExtractedImage>,
     pub image_error_count: u32,
@@ -895,6 +903,13 @@ pub struct JsParseResult {
     pub doc_meta: Option<JsDocumentMetadata>,
     /// Raw XFA packets; present only when `extractXfaPackets` is enabled.
     pub xfa_packets: Option<Vec<JsXfaPacket>>,
+}
+
+#[napi(object)]
+#[derive(Clone)]
+pub struct JsPageError {
+    pub page_num: u32,
+    pub message: String,
 }
 
 #[napi(object)]
@@ -1129,6 +1144,14 @@ impl JsParseResult {
                 .pages
                 .iter()
                 .map(|page| JsParsedPage::from_rust(page, config.extract_text_metadata))
+                .collect(),
+            page_errors: result
+                .page_errors
+                .iter()
+                .map(|error| JsPageError {
+                    page_num: error.page_number,
+                    message: error.message.clone(),
+                })
                 .collect(),
             text: result.text.clone(),
             image_error_count: result.image_error_count,

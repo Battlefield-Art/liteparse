@@ -79,6 +79,10 @@ struct ParseCommand {
     #[arg(long)]
     target_pages: Option<String>,
 
+    /// Continue after page-level extraction errors and report them in JSON.
+    #[arg(long)]
+    continue_on_page_error: bool,
+
     /// DPI for rendering (default: 150)
     #[arg(long, default_value = "150")]
     dpi: f32,
@@ -225,6 +229,10 @@ struct BatchParseCommand {
     /// Max pages to parse per file
     #[arg(long, default_value = "1000")]
     max_pages: usize,
+
+    /// Continue after page-level extraction errors and report them in JSON.
+    #[arg(long)]
+    continue_on_page_error: bool,
 
     /// DPI for rendering
     #[arg(long, default_value = "150")]
@@ -388,6 +396,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 tessdata_path: cmd.tessdata_path,
                 max_pages: cmd.max_pages,
                 target_pages: cmd.target_pages,
+                continue_on_page_error: cmd.continue_on_page_error,
                 dpi: cmd.dpi,
                 output_format: format,
                 preserve_very_small_text: cmd.preserve_small_text,
@@ -491,6 +500,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 tessdata_path: cmd.tessdata_path,
                 max_pages: cmd.max_pages,
                 target_pages: None,
+                continue_on_page_error: cmd.continue_on_page_error,
                 dpi: cmd.dpi,
                 output_format: format.clone(),
                 preserve_very_small_text: false,

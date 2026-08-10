@@ -605,6 +605,8 @@ struct PyParseResult {
     #[pyo3(get)]
     image_error_count: u32,
     #[pyo3(get)]
+    page_errors: Vec<PyPageError>,
+    #[pyo3(get)]
     form_type: Option<i32>,
     #[pyo3(get)]
     creator: Option<String>,
@@ -614,6 +616,15 @@ struct PyParseResult {
     doc_meta: Option<PyDocumentMetadata>,
     #[pyo3(get)]
     xfa_packets: Option<Vec<PyXfaPacket>>,
+}
+
+#[pyclass(frozen, from_py_object)]
+#[derive(Clone)]
+struct PyPageError {
+    #[pyo3(get)]
+    page_num: u32,
+    #[pyo3(get)]
+    message: String,
 }
 
 #[pyclass(frozen, from_py_object)]
@@ -730,6 +741,14 @@ impl PyParseResult {
                 .map(PyExtractedImage::from_rust)
                 .collect(),
             image_error_count: result.image_error_count,
+            page_errors: result
+                .page_errors
+                .into_iter()
+                .map(|error| PyPageError {
+                    page_num: error.page_number,
+                    message: error.message,
+                })
+                .collect(),
             form_type: result.form_type,
             creator: result.creator,
             producer: result.producer,
@@ -1044,6 +1063,8 @@ struct PyLiteParseConfig {
     #[pyo3(get)]
     target_pages: Option<String>,
     #[pyo3(get)]
+    continue_on_page_error: bool,
+    #[pyo3(get)]
     dpi: f32,
     #[pyo3(get)]
     output_format: String,
@@ -1123,6 +1144,7 @@ impl PyLiteParseConfig {
             tessdata_path: cfg.tessdata_path.clone(),
             max_pages: cfg.max_pages,
             target_pages: cfg.target_pages.clone(),
+            continue_on_page_error: cfg.continue_on_page_error,
             dpi: cfg.dpi,
             output_format: match cfg.output_format {
                 OutputFormat::Json => "json".to_string(),
@@ -1188,6 +1210,7 @@ impl LiteParse {
         tessdata_path = None,
         max_pages = None,
         target_pages = None,
+        continue_on_page_error = None,
         dpi = None,
         output_format = None,
         preserve_very_small_text = None,
@@ -1224,6 +1247,7 @@ impl LiteParse {
         tessdata_path: Option<String>,
         max_pages: Option<usize>,
         target_pages: Option<String>,
+        continue_on_page_error: Option<bool>,
         dpi: Option<f32>,
         output_format: Option<String>,
         preserve_very_small_text: Option<bool>,
@@ -1273,6 +1297,9 @@ impl LiteParse {
         }
         if let Some(v) = target_pages {
             cfg.target_pages = Some(v);
+        }
+        if let Some(v) = continue_on_page_error {
+            cfg.continue_on_page_error = v;
         }
         if let Some(v) = dpi {
             cfg.dpi = v;
@@ -1556,6 +1583,7 @@ fn _liteparse(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<LiteParse>()?;
     m.add_class::<PyLiteParseConfig>()?;
     m.add_class::<PyParseResult>()?;
+    m.add_class::<PyPageError>()?;
     m.add_class::<PyDocumentMetadata>()?;
     m.add_class::<PyExtractedImage>()?;
     m.add_class::<PyImageRect>()?;

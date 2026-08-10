@@ -14,8 +14,8 @@ use crate::projection;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::render;
 use crate::types::{
-    DocumentMetadata, ExtractedImage, OutlineTarget, Page, ParsedPage, PdfInput, ScreenshotRect,
-    XfaPacket,
+    DocumentMetadata, ExtractedImage, OutlineTarget, Page, PageError, ParsedPage, PdfInput,
+    ScreenshotRect, XfaPacket,
 };
 use pdfium::Library;
 
@@ -23,6 +23,9 @@ use pdfium::Library;
 pub struct ParseResult {
     /// Parsed pages with projected text layout.
     pub pages: Vec<ParsedPage>,
+    /// Page-level PDFium extraction failures collected when
+    /// `continue_on_page_error` is enabled.
+    pub page_errors: Vec<PageError>,
     /// Full document text, concatenated from all pages.
     pub text: String,
     /// Document outline (bookmarks) when present. Used by the markdown
@@ -441,6 +444,7 @@ impl LiteParse {
         #[allow(unused_mut)] // mutated only by the native image-output writer
         let (
             pages,
+            page_errors,
             ocr_rendered,
             outline,
             mut images,
@@ -514,6 +518,7 @@ impl LiteParse {
                     && self.config.output_format == crate::config::OutputFormat::Markdown,
                 self.glyph_resolver.as_deref(),
                 extract::ExtractionOutputOptions {
+                    continue_on_page_error: self.config.continue_on_page_error,
                     extract_content_bounds: self.config.extract_content_bounds,
                     extract_images: self.config.effective_extract_images(),
                     // The markdown table detector splits PDFium's merged
@@ -530,6 +535,7 @@ impl LiteParse {
             )?;
             let extract::ExtractedPages {
                 pages,
+                page_errors,
                 images,
                 image_error_count,
                 flattened_form_widgets,
@@ -591,6 +597,7 @@ impl LiteParse {
             // `lib` is dropped here, releasing the PDFium lock.
             (
                 pages,
+                page_errors,
                 rendered,
                 outline,
                 images,
@@ -688,6 +695,7 @@ impl LiteParse {
 
         Ok(ParseResult {
             pages: parsed_pages,
+            page_errors,
             text: full_text,
             outline,
             images,
@@ -733,6 +741,7 @@ impl LiteParse {
 
         ParseResult {
             pages: parsed_pages,
+            page_errors: Vec::new(),
             text: full_text,
             outline,
             images: Vec::new(),

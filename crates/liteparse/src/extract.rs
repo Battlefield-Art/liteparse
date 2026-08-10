@@ -3,8 +3,9 @@ use crate::error::LiteParseError;
 use crate::glyph_names::resolve_glyph_name;
 use crate::types::{
     DocumentAnnotation, ExtractedImage, FormField, GraphicPrimitive, ImageRef, OutlineTarget,
-    Page as LitePage, PdfInput, Rect, StructNode, StructureAttributeValue, StructureTree,
-    StructureTreeElement, TextItem, VectorGraphics, VectorLine, VectorShape, WordBox,
+    Page as LitePage, PageError, PdfInput, Rect, StructNode, StructureAttributeValue,
+    StructureTree, StructureTreeElement, TextItem, VectorGraphics, VectorLine, VectorShape,
+    WordBox,
 };
 use image::ImageEncoder;
 use pdfium::{
@@ -65,6 +66,7 @@ pub(crate) fn extract_pages_from_document(
 /// Output of [`extract_pages_and_images`].
 pub(crate) struct ExtractedPages {
     pub pages: Vec<LitePage>,
+    pub page_errors: Vec<PageError>,
     /// Empty unless `output_options.extract_images` was set.
     pub images: Vec<ExtractedImage>,
     pub image_error_count: u32,
@@ -88,6 +90,7 @@ pub(crate) fn extract_pages_and_images(
 ) -> Result<ExtractedPages, LiteParseError> {
     let page_count = document.page_count();
     let mut pages = Vec::new();
+    let mut page_errors = Vec::new();
     let mut images: Vec<ExtractedImage> = Vec::new();
     let mut image_cache = ImageCache::default();
     let mut image_error_count = 0u32;
@@ -109,182 +112,221 @@ pub(crate) fn extract_pages_and_images(
             continue;
         }
 
-        if pages.len() >= max_pages {
+        if pages.len() + page_errors.len() >= max_pages {
             break;
         }
 
-        let page = document.page(page_index)?;
-        let page_width = page.width();
-        let page_height = page.height();
-        let view_box = page.view_box().unwrap_or(RectF {
-            left: 0.0,
-            top: page_height,
-            right: page_width,
-            bottom: 0.0,
-        });
-        // Once a qualifying widget is found, PDFium flattens every visible
-        // annotation on the page. Collect every annotation-backed output first.
-        let links = if extract_links {
-            page.links(&view_box)
-        } else {
-            Vec::new()
-        };
-        // Computed when emitted (`extract_content_bounds`) or needed
-        // internally by the white-fill heuristic (`extract_vector_graphics`).
-        let content_bounds = (output_options.extract_content_bounds
-            || output_options.extract_vector_graphics)
-            .then(|| {
-                page.content_bounds()
-                    .map(|bounds| rect_from_pdfium(page.bounds_to_viewport(&view_box, &bounds)))
-            })
-            .flatten();
-        let paths = page.path_objects(&view_box);
-        let graphics = extract_layout_graphics(&paths);
-        let vector_graphics = output_options
-            .extract_vector_graphics
-            .then(|| build_vector_graphics(&paths, content_bounds.as_ref()));
-        let struct_nodes = extract_page_struct_nodes(&page, &view_box);
-        let extracted_refs =
-            extract_page_image_refs(&page, page_number, output_options.extract_images);
-        let mut image_refs = extracted_refs.refs;
-        image_error_count += extracted_refs.error_count;
-        let pdf_annotations = (output_options.extract_annotations
-            || output_options.extract_structure_tree)
-            .then(|| page.annotations(&view_box))
-            .unwrap_or_default();
-        let annotations = output_options
-            .extract_annotations
-            .then(|| pdf_annotations.iter().map(document_annotation).collect());
-        let structure_tree = output_options.extract_structure_tree.then(|| {
-            let annotations_by_object = pdf_annotations
-                .iter()
-                .filter(|annotation| annotation.subtype == "link")
-                .filter_map(|annotation| annotation.object_number.map(|n| (n, annotation)))
-                .collect::<std::collections::HashMap<_, _>>();
-            StructureTree {
-                roots: page
-                    .structure_tree()
-                    .into_iter()
-                    .map(|element| structure_tree_element(element, &annotations_by_object))
-                    .collect(),
-            }
-        });
-        let form_fields = output_options.extract_form_fields.then(|| {
-            form_environment.as_ref().map_or_else(Vec::new, |form| {
-                page.form_fields(form, &view_box, page_number)
-                    .into_iter()
-                    .map(|field| FormField {
-                        id: field.id,
-                        field_type: field.field_type,
-                        page: field.page,
-                        annotation_index: field.annotation_index,
-                        widget_index: field.widget_index,
-                        object_number: field.object_number,
-                        name: field.name,
-                        alternate_name: field.alternate_name,
-                        value: field.value,
-                        export_value: field.export_value,
-                        field_flags: field.field_flags,
-                        control_count: field.control_count,
-                        control_index: field.control_index,
-                        checked: field.checked,
-                        rect: field.rect.map(rect_from_pdfium),
-                        options: field.options,
-                        selected_options: field.selected_options,
-                    })
-                    .collect()
-            })
-        });
+        let images_before = images.len();
+        let image_errors_before = image_error_count;
+        let page_result = (|| -> Result<LitePage, LiteParseError> {
+            let page = document.page(page_index)?;
+            let page_width = page.width();
+            let page_height = page.height();
+            let view_box = page.view_box().unwrap_or(RectF {
+                left: 0.0,
+                top: page_height,
+                right: page_width,
+                bottom: 0.0,
+            });
+            // Once a qualifying widget is found, PDFium flattens every visible
+            // annotation on the page. Collect every annotation-backed output first.
+            let links = if extract_links {
+                page.links(&view_box)
+            } else {
+                Vec::new()
+            };
+            // Computed when emitted (`extract_content_bounds`) or needed
+            // internally by the white-fill heuristic (`extract_vector_graphics`).
+            let content_bounds = (output_options.extract_content_bounds
+                || output_options.extract_vector_graphics)
+                .then(|| {
+                    page.content_bounds()
+                        .map(|bounds| rect_from_pdfium(page.bounds_to_viewport(&view_box, &bounds)))
+                })
+                .flatten();
+            let paths = page.path_objects(&view_box);
+            let graphics = extract_layout_graphics(&paths);
+            let vector_graphics = output_options
+                .extract_vector_graphics
+                .then(|| build_vector_graphics(&paths, content_bounds.as_ref()));
+            let struct_nodes = extract_page_struct_nodes(&page, &view_box);
+            let extracted_refs =
+                extract_page_image_refs(&page, page_number, output_options.extract_images);
+            let mut image_refs = extracted_refs.refs;
+            image_error_count += extracted_refs.error_count;
+            let pdf_annotations = (output_options.extract_annotations
+                || output_options.extract_structure_tree)
+                .then(|| page.annotations(&view_box))
+                .unwrap_or_default();
+            let annotations = output_options
+                .extract_annotations
+                .then(|| pdf_annotations.iter().map(document_annotation).collect());
+            let structure_tree = output_options.extract_structure_tree.then(|| {
+                let annotations_by_object = pdf_annotations
+                    .iter()
+                    .filter(|annotation| annotation.subtype == "link")
+                    .filter_map(|annotation| annotation.object_number.map(|n| (n, annotation)))
+                    .collect::<std::collections::HashMap<_, _>>();
+                StructureTree {
+                    roots: page
+                        .structure_tree()
+                        .into_iter()
+                        .map(|element| structure_tree_element(element, &annotations_by_object))
+                        .collect(),
+                }
+            });
+            let form_fields = output_options.extract_form_fields.then(|| {
+                form_environment.as_ref().map_or_else(Vec::new, |form| {
+                    page.form_fields(form, &view_box, page_number)
+                        .into_iter()
+                        .map(|field| FormField {
+                            id: field.id,
+                            field_type: field.field_type,
+                            page: field.page,
+                            annotation_index: field.annotation_index,
+                            widget_index: field.widget_index,
+                            object_number: field.object_number,
+                            name: field.name,
+                            alternate_name: field.alternate_name,
+                            value: field.value,
+                            export_value: field.export_value,
+                            field_flags: field.field_flags,
+                            control_count: field.control_count,
+                            control_index: field.control_index,
+                            checked: field.checked,
+                            rect: field.rect.map(rect_from_pdfium),
+                            options: field.options,
+                            selected_options: field.selected_options,
+                        })
+                        .collect()
+                })
+            });
 
-        if output_options.extract_images && !image_refs.is_empty() {
-            let rendered = render_page_images(&page, page_number, &image_refs, &mut image_cache);
-            image_error_count += rendered.error_count;
-            images.extend(rendered.images);
-            for image_ref in &mut image_refs {
-                image_ref.jpeg_bytes = None;
-                image_ref.raw_bytes = None;
+            if output_options.extract_images && !image_refs.is_empty() {
+                let rendered =
+                    render_page_images(&page, page_number, &image_refs, &mut image_cache);
+                image_error_count += rendered.error_count;
+                images.extend(rendered.images);
+                for image_ref in &mut image_refs {
+                    image_ref.jpeg_bytes = None;
+                    image_ref.raw_bytes = None;
+                }
+            }
+
+            // PDFium's text API reads only the page content stream. Filled form
+            // values commonly live in widget appearance streams, so promote only
+            // those widget appearances into page content and reload before text
+            // extraction. Non-widget annotations are excluded, and this does not
+            // initialize the form environment or execute document JS.
+            //
+            // `widget_text_rects` is empty for the overwhelming majority of pages —
+            // documents with no AcroForm catalog never even reach the annotation
+            // walk — so the whole path costs one `form_type()` call for most files.
+            let extract_text = |page: &Page| -> Result<Vec<TextItem>, LiteParseError> {
+                let text_page = page.text()?;
+                extract_page_text_items(
+                    page,
+                    &text_page,
+                    &view_box,
+                    glyph_resolver,
+                    output_options.emit_word_boxes,
+                    output_options.extract_text_metadata,
+                )
+            };
+            let widget_text_rects = if document_has_form {
+                page.form_widget_text_rects(&view_box)
+            } else {
+                Vec::new()
+            };
+            let mut text_items = if widget_text_rects.is_empty() {
+                extract_text(&page)?
+            } else {
+                // PDFium's text layer keeps only one of two runs that start at
+                // essentially the same point, so a flattened appearance can
+                // suppress page text it lands on. Usually widget rects sit over
+                // blank space, and this bounds-only probe says so without touching
+                // the text API; only when a widget really does cover existing text
+                // do we extract twice and put back what was suppressed.
+                let overlaps_existing_text =
+                    page.text_objects_overlap(&view_box, &widget_text_rects);
+                let before = overlaps_existing_text
+                    .then(|| extract_text(&page))
+                    .transpose()?;
+                drop(page);
+                match document.flatten_form_widgets(page_index)? {
+                    Some(flattened_page) => {
+                        flattened_form_widgets = true;
+                        let mut items = extract_text(&flattened_page)?;
+                        if let Some(before) = before {
+                            restore_flattened_over_text(&mut items, before, &widget_text_rects);
+                        }
+                        items
+                    }
+                    None => extract_text(&document.page(page_index)?)?,
+                }
+            };
+            assign_links(&mut text_items, &links);
+            assign_strikethrough(&mut text_items, &graphics);
+
+            Ok(LitePage {
+                page_number: page_number as usize,
+                page_width,
+                page_height,
+                content_bounds: output_options
+                    .extract_content_bounds
+                    .then_some(content_bounds)
+                    .flatten(),
+                text_items,
+                graphics,
+                vector_graphics,
+                struct_nodes,
+                image_refs,
+                annotations,
+                form_fields,
+                structure_tree,
+            })
+        })();
+
+        match resolve_page_result(
+            page_number,
+            page_result,
+            output_options.continue_on_page_error,
+            &mut page_errors,
+        )? {
+            Some(page) => pages.push(page),
+            None => {
+                images.truncate(images_before);
+                image_error_count = image_errors_before;
             }
         }
-
-        // PDFium's text API reads only the page content stream. Filled form
-        // values commonly live in widget appearance streams, so promote only
-        // those widget appearances into page content and reload before text
-        // extraction. Non-widget annotations are excluded, and this does not
-        // initialize the form environment or execute document JS.
-        //
-        // `widget_text_rects` is empty for the overwhelming majority of pages —
-        // documents with no AcroForm catalog never even reach the annotation
-        // walk — so the whole path costs one `form_type()` call for most files.
-        let extract_text = |page: &Page| -> Result<Vec<TextItem>, LiteParseError> {
-            let text_page = page.text()?;
-            extract_page_text_items(
-                page,
-                &text_page,
-                &view_box,
-                glyph_resolver,
-                output_options.emit_word_boxes,
-                output_options.extract_text_metadata,
-            )
-        };
-        let widget_text_rects = if document_has_form {
-            page.form_widget_text_rects(&view_box)
-        } else {
-            Vec::new()
-        };
-        let mut text_items = if widget_text_rects.is_empty() {
-            extract_text(&page)?
-        } else {
-            // PDFium's text layer keeps only one of two runs that start at
-            // essentially the same point, so a flattened appearance can
-            // suppress page text it lands on. Usually widget rects sit over
-            // blank space, and this bounds-only probe says so without touching
-            // the text API; only when a widget really does cover existing text
-            // do we extract twice and put back what was suppressed.
-            let overlaps_existing_text = page.text_objects_overlap(&view_box, &widget_text_rects);
-            let before = overlaps_existing_text
-                .then(|| extract_text(&page))
-                .transpose()?;
-            drop(page);
-            match document.flatten_form_widgets(page_index)? {
-                Some(flattened_page) => {
-                    flattened_form_widgets = true;
-                    let mut items = extract_text(&flattened_page)?;
-                    if let Some(before) = before {
-                        restore_flattened_over_text(&mut items, before, &widget_text_rects);
-                    }
-                    items
-                }
-                None => extract_text(&document.page(page_index)?)?,
-            }
-        };
-        assign_links(&mut text_items, &links);
-        assign_strikethrough(&mut text_items, &graphics);
-
-        pages.push(LitePage {
-            page_number: page_number as usize,
-            page_width,
-            page_height,
-            content_bounds: output_options
-                .extract_content_bounds
-                .then_some(content_bounds)
-                .flatten(),
-            text_items,
-            graphics,
-            vector_graphics,
-            struct_nodes,
-            image_refs,
-            annotations,
-            form_fields,
-            structure_tree,
-        });
     }
 
     Ok(ExtractedPages {
         pages,
+        page_errors,
         images,
         image_error_count,
         flattened_form_widgets,
     })
+}
+
+fn resolve_page_result<T>(
+    page_number: u32,
+    result: Result<T, LiteParseError>,
+    continue_on_page_error: bool,
+    page_errors: &mut Vec<PageError>,
+) -> Result<Option<T>, LiteParseError> {
+    match result {
+        Ok(value) => Ok(Some(value)),
+        Err(error) if continue_on_page_error => {
+            page_errors.push(PageError {
+                page_number,
+                message: error.to_string(),
+            });
+            Ok(None)
+        }
+        Err(error) => Err(error),
+    }
 }
 
 /// Put back page text that flattening suppressed.
@@ -337,6 +379,7 @@ fn rect_contains_center(rect: &RectF, item: &TextItem) -> bool {
 
 #[derive(Debug, Clone, Copy, Default)]
 pub(crate) struct ExtractionOutputOptions {
+    pub continue_on_page_error: bool,
     pub extract_content_bounds: bool,
     pub extract_text_metadata: bool,
     pub extract_images: bool,
@@ -3390,5 +3433,40 @@ mod tests {
             None,
         );
         assert!(res.is_err());
+    }
+
+    #[test]
+    fn page_error_is_fail_fast_by_default() {
+        let mut page_errors = Vec::new();
+        let result = resolve_page_result::<()>(
+            3,
+            Err(LiteParseError::Other("broken page".into())),
+            false,
+            &mut page_errors,
+        );
+
+        assert!(result.is_err());
+        assert!(page_errors.is_empty());
+    }
+
+    #[test]
+    fn page_error_can_be_collected_and_skipped() {
+        let mut page_errors = Vec::new();
+        let result = resolve_page_result::<()>(
+            3,
+            Err(LiteParseError::Other("broken page".into())),
+            true,
+            &mut page_errors,
+        )
+        .unwrap();
+
+        assert!(result.is_none());
+        assert_eq!(
+            page_errors,
+            vec![PageError {
+                page_number: 3,
+                message: "broken page".into(),
+            }]
+        );
     }
 }
