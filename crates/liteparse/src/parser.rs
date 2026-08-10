@@ -21,6 +21,9 @@ use pdfium::Library;
 
 /// Result of parsing a document.
 pub struct ParseResult {
+    /// Total number of pages in the source document, before `target_pages` or
+    /// `max_pages` limits are applied.
+    pub total_pages: u32,
     /// Parsed pages with projected text layout.
     pub pages: Vec<ParsedPage>,
     /// Full document text, concatenated from all pages.
@@ -441,6 +444,7 @@ impl LiteParse {
         #[allow(unused_mut)] // mutated only by the native image-output writer
         let (
             pages,
+            total_pages,
             ocr_rendered,
             outline,
             mut images,
@@ -470,6 +474,7 @@ impl LiteParse {
             #[cfg(target_arch = "wasm32")]
             let document_input = &validated_input;
             let document = extract::load_document_from_input(&lib, document_input, password)?;
+            let total_pages = document.page_count().max(0) as u32;
             let form_type = self
                 .config
                 .extract_form_fields
@@ -591,6 +596,7 @@ impl LiteParse {
             // `lib` is dropped here, releasing the PDFium lock.
             (
                 pages,
+                total_pages,
                 rendered,
                 outline,
                 images,
@@ -687,6 +693,7 @@ impl LiteParse {
         }
 
         Ok(ParseResult {
+            total_pages,
             pages: parsed_pages,
             text: full_text,
             outline,
@@ -709,6 +716,7 @@ impl LiteParse {
     /// is fully synchronous. Used when an external extractor (e.g. with its
     /// own font-recovery pipeline) owns text extraction.
     pub fn parse_from_pages(&self, pages: Vec<Page>, outline: Vec<OutlineTarget>) -> ParseResult {
+        let total_pages = pages.len().min(u32::MAX as usize) as u32;
         let mut parsed_pages = projection::project_pages_to_grid(pages);
 
         let full_text = if self.config.output_format == crate::config::OutputFormat::Markdown {
@@ -732,6 +740,7 @@ impl LiteParse {
         };
 
         ParseResult {
+            total_pages,
             pages: parsed_pages,
             text: full_text,
             outline,

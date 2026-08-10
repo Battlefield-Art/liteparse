@@ -596,6 +596,9 @@ impl PyParsedPage {
 #[pyclass(frozen, from_py_object)]
 #[derive(Clone)]
 struct PyParseResult {
+    /// Total source-document pages before target/max-page filtering.
+    #[pyo3(get)]
+    total_pages: u32,
     #[pyo3(get)]
     pages: Vec<PyParsedPage>,
     #[pyo3(get)]
@@ -718,6 +721,7 @@ impl PyParseResult {
 impl PyParseResult {
     fn from_rust(result: liteparse::parser::ParseResult, extract_text_metadata: bool) -> Self {
         Self {
+            total_pages: result.total_pages,
             pages: result
                 .pages
                 .into_iter()

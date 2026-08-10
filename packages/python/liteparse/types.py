@@ -248,6 +248,8 @@ class ParseResult:
     """Result of parsing a document."""
     pages: List[ParsedPage]
     text: str
+    #: Total source-document pages before target/max-page filtering.
+    total_pages: int = 0
     images: List[ExtractedImage] = field(default_factory=list)
     image_error_count: int = 0
     #: PDFium form type, present only when ``extract_form_fields=True``.

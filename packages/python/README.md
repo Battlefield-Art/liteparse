@@ -18,6 +18,7 @@ from liteparse import LiteParse
 parser = LiteParse()
 result = parser.parse("document.pdf")
 print(result.text)
+print(f"Source document pages: {result.total_pages}")
 
 # Access structured data
 for page in result.pages:

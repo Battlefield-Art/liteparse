@@ -881,6 +881,8 @@ impl JsParsedPage {
 #[napi(object)]
 #[derive(Clone)]
 pub struct JsParseResult {
+    /// Total source-document pages before target/max-page filtering.
+    pub total_pages: u32,
     pub pages: Vec<JsParsedPage>,
     pub text: String,
     pub images: Vec<JsExtractedImage>,
@@ -1125,6 +1127,7 @@ impl JsPageComplexityStats {
 impl JsParseResult {
     pub fn from_rust(result: &ParseResult, config: &LiteParseConfig) -> Self {
         Self {
+            total_pages: result.total_pages,
             pages: result
                 .pages
                 .iter()
