@@ -92,6 +92,26 @@ async fn test_parse_bytes_image_integration() {
         .await
         .expect("Should be able to parse");
     assert_eq!(parsed.pages.len(), 1);
+    assert_eq!(parsed.total_pages, 1);
+}
+
+#[tokio::test]
+#[serial]
+async fn test_total_pages_precedes_target_page_filtering() {
+    let lit = LiteParse::new(LiteParseConfig {
+        ocr_enabled: false,
+        quiet: true,
+        target_pages: Some("2".into()),
+        ..LiteParseConfig::default()
+    });
+    let parsed = lit
+        .parse("../../integration_tests_data/filled_acroform.pdf")
+        .await
+        .expect("Should be able to parse a selected page");
+
+    assert_eq!(parsed.total_pages, 3);
+    assert_eq!(parsed.pages.len(), 1);
+    assert_eq!(parsed.pages[0].page_number, 2);
 }
 
 #[tokio::test]

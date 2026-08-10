@@ -347,6 +347,8 @@ export interface ExtractedImage {
 }
 
 export interface ParseResult {
+  /** Total source-document pages before `targetPages` or `maxPages` filtering. */
+  totalPages: number;
   pages: ParsedPage[];
   text: string;
   /** Populated only when `extractImages` is true. */
@@ -608,6 +610,7 @@ export class LiteParse {
       typeof input === "string" ? input : Buffer.from(input);
     const result: NativeParseResult = await this._native.parse(nativeInput);
     return {
+      totalPages: result.totalPages,
       pages: result.pages.map(toPage),
       text: result.text,
       images: (result.images ?? []).map(toImage),
@@ -636,6 +639,7 @@ export class LiteParse {
     }));
     const result = this._native.parsePages(nativePages);
     return {
+      totalPages: result.totalPages,
       pages: result.pages.map(toPage),
       text: result.text,
       images: (result.images ?? []).map(toImage),

@@ -339,6 +339,7 @@ def _convert_native_result(native_result: Any) -> ParseResult:
     return ParseResult(
         pages=pages,
         text=native_result.text,
+        total_pages=getattr(native_result, "total_pages", len(pages)),
         images=images,
         image_error_count=getattr(native_result, "image_error_count", 0),
         form_type=getattr(native_result, "form_type", None),

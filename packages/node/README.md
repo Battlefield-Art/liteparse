@@ -18,6 +18,7 @@ import { LiteParse } from '@llamaindex/liteparse';
 const parser = new LiteParse();
 const result = await parser.parse('document.pdf');
 console.log(result.text);
+console.log(`Source document pages: ${result.totalPages}`);
 
 // Access structured data
 for (const page of result.pages) {

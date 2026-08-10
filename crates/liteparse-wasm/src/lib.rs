@@ -614,6 +614,8 @@ impl StructureTreeElement {
 #[tsify(into_wasm_abi)]
 #[serde(rename_all = "camelCase")]
 pub struct ParseResult {
+    /// Total source-document pages before target/max-page filtering.
+    pub total_pages: u32,
     pub pages: Vec<ParsedPage>,
     pub text: String,
     pub images: Vec<ExtractedImage>,
@@ -1048,6 +1050,7 @@ impl LiteParse {
             .collect();
 
         Ok(ParseResult {
+            total_pages: result.total_pages,
             pages,
             text: result.text.clone(),
             images,
