@@ -371,6 +371,21 @@ export interface ParseResult {
   xfaPackets?: XfaPacket[];
 }
 
+export interface ParseBatch {
+  /** First source page in this batch (1-indexed). */
+  startPage: number;
+  /** Last source page requested for this batch (1-indexed). */
+  endPage: number;
+  /** Total source-document pages, before the parser's `maxPages` cap. */
+  totalPages: number;
+  result: ParseResult;
+}
+
+export interface ParseBatchOptions {
+  /** Maximum pages materialized in one result. Default: 25. */
+  batchSize?: number;
+}
+
 /** Provenance and tamper-analysis facts extracted from the source PDF. */
 export interface DocumentMetadata {
   creationDate?: string;
@@ -621,6 +636,66 @@ export class LiteParse {
       docMeta: result.docMeta,
       xfaPackets: result.xfaPackets,
     };
+  }
+
+  /**
+   * Parse a document in bounded-memory page batches.
+   *
+   * Each yielded result is independent and becomes collectible when the
+   * caller advances the iterator. The document is reopened for each batch;
+   * this trades a small amount of repeated setup for a bounded JS object
+   * graph on documents with many text items. Do not retain prior results if
+   * bounded memory is required.
+   *
+   * Batch-local layout operations (including repeated header/footer removal
+   * and image deduplication) do not see pages outside their batch. A parser
+   * configured with `targetPages` is rejected because its selection would be
+   * ambiguous with the ranges generated here.
+   */
+  async *parseBatches(
+    input: LiteParseInput,
+    options: ParseBatchOptions = {},
+  ): AsyncGenerator<ParseBatch> {
+    if (this._config.targetPages != null) {
+      throw new Error(
+        "parseBatches cannot be used when targetPages is configured",
+      );
+    }
+    const batchSize = options.batchSize ?? 25;
+    if (
+      !Number.isSafeInteger(batchSize) ||
+      batchSize <= 0 ||
+      batchSize > 100_000
+    ) {
+      throw new RangeError("batchSize must be an integer between 1 and 100000");
+    }
+
+    let startPage = 1;
+    let pageLimit = this._config.maxPages;
+    while (startPage <= pageLimit) {
+      const requestedEndPage = Math.min(
+        startPage + batchSize - 1,
+        pageLimit,
+      );
+      const batchParser = new LiteParse({
+        ...this._config,
+        maxPages: batchSize,
+        targetPages: `${startPage}-${requestedEndPage}`,
+      });
+      const result = await batchParser.parse(input);
+      if (!Number.isSafeInteger(result.totalPages)) {
+        throw new Error(
+          "parseBatches requires a native LiteParse binary that exposes totalPages",
+        );
+      }
+      pageLimit = Math.min(result.totalPages, this._config.maxPages);
+      if (result.pages.length === 0) {
+        return;
+      }
+      const endPage = Math.min(requestedEndPage, pageLimit);
+      yield { startPage, endPage, totalPages: result.totalPages, result };
+      startPage = endPage + 1;
+    }
   }
 
   /**

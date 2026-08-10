@@ -26,6 +26,21 @@ for (const page of result.pages) {
 }
 ```
 
+### Bounded-memory parsing
+
+For documents with many text items, consume page batches without retaining
+earlier results:
+
+```typescript
+const parser = new LiteParse();
+for await (const batch of parser.parseBatches('large.pdf', { batchSize: 20 })) {
+  await processPages(batch.result.pages);
+}
+```
+
+The document is reopened for each batch. Header/footer detection and image
+deduplication are therefore batch-local.
+
 ## Markdown Output
 
 LiteParse can render documents directly to Markdown including headings, tables, lists,
