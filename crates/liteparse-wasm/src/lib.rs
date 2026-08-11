@@ -621,6 +621,8 @@ impl StructureTreeElement {
 #[tsify(into_wasm_abi)]
 #[serde(rename_all = "camelCase")]
 pub struct ParseResult {
+    /// Total source-document pages before target/max-page filtering.
+    pub total_pages: u32,
     pub pages: Vec<ParsedPage>,
     pub text: String,
     pub images: Vec<ExtractedImage>,
@@ -925,175 +927,189 @@ impl LiteParse {
             .await
             .map_err(|e| JsError::new(&format!("parse failed: {}", e)))?;
 
-        let extract_text_metadata = self.inner.config().extract_text_metadata;
-        let pages: Vec<ParsedPage> = result
-            .pages
-            .iter()
-            .map(|p| ParsedPage {
-                page_num: p.page_number,
-                width: p.page_width,
-                height: p.page_height,
-                content_bounds: p.content_bounds.as_ref().map(|b| VectorRect {
-                    x: b.x,
-                    y: b.y,
-                    width: b.width,
-                    height: b.height,
-                }),
-                text: p.text.clone(),
-                markdown: p.markdown.clone(),
-                text_items: p
-                    .text_items
-                    .iter()
-                    .map(|i| {
-                        // Core-gated metadata view; `TextMetadata` defines
-                        // which fields `extractTextMetadata` covers.
-                        let meta = i.text_metadata(extract_text_metadata);
-                        TextItem {
-                            text: i.text.clone(),
-                            x: i.x,
-                            y: i.y,
-                            width: i.width,
-                            height: i.height,
-                            font_name: i.font_name.clone(),
-                            font_size: i.font_size,
-                            confidence: i.confidence,
-                            rotation: i.rotation,
-                            font_height: meta.font_height,
-                            font_ascent: meta.font_ascent,
-                            font_descent: meta.font_descent,
-                            font_weight: meta.font_weight,
-                            text_width: meta.text_width,
-                            font_is_buggy: meta.font_is_buggy,
-                            mcid: meta.mcid,
-                            fill_color: meta.fill_color.map(str::to_owned),
-                            stroke_color: meta.stroke_color.map(str::to_owned),
-                            char_codes: meta
-                                .char_codes
-                                .filter(|codes| !codes.is_empty())
-                                .map(<[u32]>::to_vec),
-                            trailing_space_generated: meta.trailing_space_generated,
-                            words: if i.words.is_empty() {
-                                None
-                            } else {
-                                Some(
-                                    i.words
-                                        .iter()
-                                        .map(|w| WordBox {
-                                            text: w.text.clone(),
-                                            x: w.x,
-                                            y: w.y,
-                                            width: w.width,
-                                            height: w.height,
-                                        })
-                                        .collect(),
-                                )
-                            },
-                        }
-                    })
-                    .collect(),
-                complexity: p.complexity.as_ref().map(PageComplexityStats::from_rust),
-                vector_graphics: p.vector_graphics.as_ref().map(|v| VectorGraphics {
-                    shapes: v
-                        .shapes
-                        .iter()
-                        .map(|s| VectorShape {
-                            bbox: VectorRect {
-                                x: s.bbox.x,
-                                y: s.bbox.y,
-                                width: s.bbox.width,
-                                height: s.bbox.height,
-                            },
-                            stroke: s.stroke,
-                            stroke_color: s.stroke_color.clone(),
-                            fill: s.fill,
-                            fill_color: s.fill_color.clone(),
-                            has_curve: s.has_curve,
-                        })
-                        .collect(),
-                    lines: v
-                        .lines
-                        .iter()
-                        .map(|l| VectorLine {
-                            x1: l.x1,
-                            y1: l.y1,
-                            x2: l.x2,
-                            y2: l.y2,
-                            stroke: l.stroke,
-                            stroke_width: l.stroke_width,
-                            stroke_color: l.stroke_color.clone(),
-                            fill: l.fill,
-                            fill_color: l.fill_color.clone(),
-                        })
-                        .collect(),
-                }),
-                annotations: p.annotations.as_ref().map(|annotations| {
-                    annotations
-                        .iter()
-                        .map(DocumentAnnotation::from_rust)
-                        .collect()
-                }),
-                form_fields: p
-                    .form_fields
-                    .as_ref()
-                    .map(|fields| fields.iter().map(FormField::from_rust).collect()),
-                structure_tree: p.structure_tree.as_ref().map(StructureTree::from_rust),
-            })
-            .collect();
+        Ok(to_js_result(
+            &result,
+            self.inner.config().extract_text_metadata,
+        ))
+    }
+}
 
-        let images: Vec<ExtractedImage> = result
-            .images
-            .iter()
-            .map(|img| ExtractedImage {
-                id: img.id.clone(),
-                name: img.name.clone(),
-                path: img.path.clone(),
-                page: img.page,
-                bbox: ImageRect {
-                    x: img.bbox.x,
-                    y: img.bbox.y,
-                    width: img.bbox.width,
-                    height: img.bbox.height,
-                },
-                width: img.width,
-                height: img.height,
-                rotation: img.rotation,
-                format: img.format.clone(),
-                duplicate_of: img.duplicate_of.clone(),
-                bytes: img.bytes.as_slice().to_vec(),
-            })
-            .collect();
-
-        Ok(ParseResult {
-            pages,
-            text: result.text.clone(),
-            images,
-            image_error_count: result.image_error_count,
-            page_errors: result
-                .page_errors
+/// Convert a core [`CoreParseResult`] into the wasm-bindgen view.
+///
+/// Shared by `parse()` and `ParseSession::nextBatch()` so a batch is mapped
+/// exactly the same way a whole-document result is.
+fn to_js_result(result: &liteparse::ParseResult, extract_text_metadata: bool) -> ParseResult {
+    let pages: Vec<ParsedPage> = result
+        .pages
+        .iter()
+        .map(|p| ParsedPage {
+            page_num: p.page_number,
+            width: p.page_width,
+            height: p.page_height,
+            content_bounds: p.content_bounds.as_ref().map(|b| VectorRect {
+                x: b.x,
+                y: b.y,
+                width: b.width,
+                height: b.height,
+            }),
+            text: p.text.clone(),
+            markdown: p.markdown.clone(),
+            text_items: p
+                .text_items
                 .iter()
-                .map(|error| PageError {
-                    page_num: error.page_number,
-                    message: error.message.clone(),
+                .map(|i| {
+                    // Core-gated metadata view; `TextMetadata` defines
+                    // which fields `extractTextMetadata` covers.
+                    let meta = i.text_metadata(extract_text_metadata);
+                    TextItem {
+                        text: i.text.clone(),
+                        x: i.x,
+                        y: i.y,
+                        width: i.width,
+                        height: i.height,
+                        font_name: i.font_name.clone(),
+                        font_size: i.font_size,
+                        confidence: i.confidence,
+                        rotation: i.rotation,
+                        font_height: meta.font_height,
+                        font_ascent: meta.font_ascent,
+                        font_descent: meta.font_descent,
+                        font_weight: meta.font_weight,
+                        text_width: meta.text_width,
+                        font_is_buggy: meta.font_is_buggy,
+                        mcid: meta.mcid,
+                        fill_color: meta.fill_color.map(str::to_owned),
+                        stroke_color: meta.stroke_color.map(str::to_owned),
+                        char_codes: meta
+                            .char_codes
+                            .filter(|codes| !codes.is_empty())
+                            .map(<[u32]>::to_vec),
+                        trailing_space_generated: meta.trailing_space_generated,
+                        words: if i.words.is_empty() {
+                            None
+                        } else {
+                            Some(
+                                i.words
+                                    .iter()
+                                    .map(|w| WordBox {
+                                        text: w.text.clone(),
+                                        x: w.x,
+                                        y: w.y,
+                                        width: w.width,
+                                        height: w.height,
+                                    })
+                                    .collect(),
+                            )
+                        },
+                    }
                 })
                 .collect(),
-            form_type: result.form_type,
-            creator: result.creator.clone(),
-            producer: result.producer.clone(),
-            doc_meta: result.doc_meta.as_ref().map(DocumentMetadata::from),
-            xfa_packets: result.xfa_packets.as_ref().map(|packets| {
-                packets
+            complexity: p.complexity.as_ref().map(PageComplexityStats::from_rust),
+            vector_graphics: p.vector_graphics.as_ref().map(|v| VectorGraphics {
+                shapes: v
+                    .shapes
                     .iter()
-                    .map(|packet| XfaPacket {
-                        index: packet.index,
-                        name: packet.name.clone(),
-                        content_length: packet.content_length,
-                        content: packet.content.clone(),
+                    .map(|s| VectorShape {
+                        bbox: VectorRect {
+                            x: s.bbox.x,
+                            y: s.bbox.y,
+                            width: s.bbox.width,
+                            height: s.bbox.height,
+                        },
+                        stroke: s.stroke,
+                        stroke_color: s.stroke_color.clone(),
+                        fill: s.fill,
+                        fill_color: s.fill_color.clone(),
+                        has_curve: s.has_curve,
                     })
+                    .collect(),
+                lines: v
+                    .lines
+                    .iter()
+                    .map(|l| VectorLine {
+                        x1: l.x1,
+                        y1: l.y1,
+                        x2: l.x2,
+                        y2: l.y2,
+                        stroke: l.stroke,
+                        stroke_width: l.stroke_width,
+                        stroke_color: l.stroke_color.clone(),
+                        fill: l.fill,
+                        fill_color: l.fill_color.clone(),
+                    })
+                    .collect(),
+            }),
+            annotations: p.annotations.as_ref().map(|annotations| {
+                annotations
+                    .iter()
+                    .map(DocumentAnnotation::from_rust)
                     .collect()
             }),
+            form_fields: p
+                .form_fields
+                .as_ref()
+                .map(|fields| fields.iter().map(FormField::from_rust).collect()),
+            structure_tree: p.structure_tree.as_ref().map(StructureTree::from_rust),
         })
-    }
+        .collect();
 
+    let images: Vec<ExtractedImage> = result
+        .images
+        .iter()
+        .map(|img| ExtractedImage {
+            id: img.id.clone(),
+            name: img.name.clone(),
+            path: img.path.clone(),
+            page: img.page,
+            bbox: ImageRect {
+                x: img.bbox.x,
+                y: img.bbox.y,
+                width: img.bbox.width,
+                height: img.bbox.height,
+            },
+            width: img.width,
+            height: img.height,
+            rotation: img.rotation,
+            format: img.format.clone(),
+            duplicate_of: img.duplicate_of.clone(),
+            bytes: img.bytes.as_slice().to_vec(),
+        })
+        .collect();
+
+    ParseResult {
+        total_pages: result.total_pages,
+        pages,
+        text: result.text.clone(),
+        images,
+        image_error_count: result.image_error_count,
+        page_errors: result
+            .page_errors
+            .iter()
+            .map(|error| PageError {
+                page_num: error.page_number,
+                message: error.message.clone(),
+            })
+            .collect(),
+        form_type: result.form_type,
+        creator: result.creator.clone(),
+        producer: result.producer.clone(),
+        doc_meta: result.doc_meta.as_ref().map(DocumentMetadata::from),
+        xfa_packets: result.xfa_packets.as_ref().map(|packets| {
+            packets
+                .iter()
+                .map(|packet| XfaPacket {
+                    index: packet.index,
+                    name: packet.name.clone(),
+                    content_length: packet.content_length,
+                    content: packet.content.clone(),
+                })
+                .collect()
+        }),
+    }
+}
+
+#[wasm_bindgen]
+impl LiteParse {
     /// Determine per-page complexity for the given PDF bytes. Returns
     /// `Promise<PageComplexityStats[]>` — a cheap pre-OCR check with per-page
     /// signals and a `needsOcr` verdict.
@@ -1106,6 +1122,88 @@ impl LiteParse {
             .map_err(|e| JsError::new(&format!("is_complex failed: {}", e)))?;
 
         Ok(stats.iter().map(PageComplexityStats::from_rust).collect())
+    }
+
+    /// Open PDF bytes for bounded-memory batch parsing. Returns
+    /// `Promise<ParseSession>`.
+    ///
+    /// Yields `batchSize` pages at a time (default 25), which bounds both the
+    /// Rust-side result and the JS objects built from it — the wasm heap has a
+    /// hard ceiling, so a large document parsed whole can exhaust it.
+    ///
+    /// Cross-page passes (repeated header/footer removal, image deduplication)
+    /// see only the pages in their own batch, so output can differ from a
+    /// whole-document `parse()`.
+    #[wasm_bindgen(js_name = openBatchSession)]
+    pub async fn open_batch_session(
+        &self,
+        data: Vec<u8>,
+        batch_size: Option<usize>,
+    ) -> Result<ParseSession, JsError> {
+        let batch_size = batch_size.unwrap_or(liteparse::DEFAULT_PAGE_BATCH_SIZE);
+        let session = self
+            .inner
+            .open_batch_session(PdfInput::Bytes(data), batch_size)
+            .await
+            .map_err(|e| JsError::new(&format!("open failed: {}", e)))?;
+
+        Ok(ParseSession {
+            extract_text_metadata: self.inner.config().extract_text_metadata,
+            inner: session,
+        })
+    }
+}
+
+/// One batch of pages from a [`ParseSession`].
+#[derive(Serialize, Tsify)]
+#[tsify(into_wasm_abi)]
+#[serde(rename_all = "camelCase")]
+pub struct ParseBatch {
+    /// First source page in this batch, 1-indexed.
+    pub start_page: u32,
+    /// Last source page in this batch, 1-indexed and inclusive.
+    pub end_page: u32,
+    /// The pages in `startPage..=endPage`, as an ordinary parse result.
+    pub result: ParseResult,
+}
+
+/// A document opened once and parsed in bounded page batches.
+///
+/// Created by `LiteParse.openBatchSession()`. Call `nextBatch()` until it
+/// returns `undefined`, then `free()` the session to release its wasm-side
+/// memory promptly (wasm-bindgen objects are not garbage collected).
+#[wasm_bindgen]
+pub struct ParseSession {
+    inner: liteparse::ParseSession,
+    extract_text_metadata: bool,
+}
+
+#[wasm_bindgen]
+impl ParseSession {
+    /// Total pages in the source document, before `maxPages` or batching.
+    #[wasm_bindgen(getter, js_name = totalPages)]
+    pub fn total_pages(&self) -> u32 {
+        self.inner.total_pages()
+    }
+
+    /// Parse and return the next batch, or `undefined` once every page within
+    /// `maxPages` has been yielded.
+    ///
+    /// Batches are parsed one at a time: await each call before making the
+    /// next (a concurrent call throws wasm-bindgen's recursive-borrow error).
+    #[wasm_bindgen(js_name = nextBatch)]
+    pub async fn next_batch(&mut self) -> Result<Option<ParseBatch>, JsError> {
+        let batch = self
+            .inner
+            .next_batch()
+            .await
+            .map_err(|e| JsError::new(&format!("batch parse failed: {}", e)))?;
+
+        Ok(batch.map(|batch| ParseBatch {
+            start_page: batch.start_page,
+            end_page: batch.end_page,
+            result: to_js_result(&batch.result, self.extract_text_metadata),
+        }))
     }
 }
 

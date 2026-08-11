@@ -888,6 +888,8 @@ impl JsParsedPage {
 #[napi(object)]
 #[derive(Clone)]
 pub struct JsParseResult {
+    /// Total source-document pages before target/max-page filtering.
+    pub total_pages: u32,
     pub pages: Vec<JsParsedPage>,
     pub page_errors: Vec<JsPageError>,
     pub text: String,
@@ -903,6 +905,17 @@ pub struct JsParseResult {
     pub doc_meta: Option<JsDocumentMetadata>,
     /// Raw XFA packets; present only when `extractXfaPackets` is enabled.
     pub xfa_packets: Option<Vec<JsXfaPacket>>,
+}
+
+/// One batch of pages from a `ParseSession`.
+#[napi(object)]
+pub struct JsParseBatch {
+    /// First source page in this batch, 1-indexed.
+    pub start_page: u32,
+    /// Last source page in this batch, 1-indexed and inclusive.
+    pub end_page: u32,
+    /// The pages in `startPage..=endPage`, as an ordinary parse result.
+    pub result: JsParseResult,
 }
 
 #[napi(object)]
@@ -1140,6 +1153,7 @@ impl JsPageComplexityStats {
 impl JsParseResult {
     pub fn from_rust(result: &ParseResult, config: &LiteParseConfig) -> Self {
         Self {
+            total_pages: result.total_pages,
             pages: result
                 .pages
                 .iter()

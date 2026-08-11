@@ -18,12 +18,34 @@ import { LiteParse } from '@llamaindex/liteparse';
 const parser = new LiteParse();
 const result = await parser.parse('document.pdf');
 console.log(result.text);
+console.log(`Source document pages: ${result.totalPages}`);
 
 // Access structured data
 for (const page of result.pages) {
   console.log(`Page ${page.pageNum}: ${page.textItems.length} text items`);
 }
 ```
+
+### Bounded-memory parsing
+
+For documents with many text items, consume page batches without retaining
+earlier results:
+
+```typescript
+const parser = new LiteParse();
+for await (const batch of parser.parseBatches('large.pdf', { batchSize: 20 })) {
+  await processPages(batch.result.pages);
+}
+```
+
+Each batch is an ordinary parse result covering `batch.startPage` through
+`batch.endPage`, and becomes collectible as soon as you advance the iterator.
+A non-PDF source is converted once, not once per batch.
+
+Cross-page passes only see the pages in their own batch, so repeated
+header/footer removal and image deduplication are batch-local and the output
+can differ from `parse()`. Prefer `parse()` unless the size of the
+materialized result is the problem.
 
 ## Markdown Output
 

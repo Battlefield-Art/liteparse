@@ -255,6 +255,8 @@ class ParseResult:
     """Result of parsing a document."""
     pages: List[ParsedPage]
     text: str
+    #: Total source-document pages before target/max-page filtering.
+    total_pages: int = 0
     images: List[ExtractedImage] = field(default_factory=list)
     image_error_count: int = 0
     page_errors: List[PageError] = field(default_factory=list)
@@ -281,6 +283,19 @@ class ParseResult:
             if page.page_num == page_num:
                 return page
         return None
+
+
+@dataclass
+class ParseBatch:
+    """One batch of pages from :meth:`LiteParse.parse_batches`."""
+    #: First source page in this batch (1-indexed).
+    start_page: int
+    #: Last source page in this batch (1-indexed, inclusive).
+    end_page: int
+    #: Total source-document pages, before the parser's ``max_pages`` cap.
+    total_pages: int
+    #: The pages in ``start_page..end_page``, as an ordinary parse result.
+    result: ParseResult
 
 
 @dataclass
