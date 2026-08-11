@@ -234,6 +234,7 @@ export interface NativeExtractedImage {
 }
 
 export interface NativeParseResult {
+  totalPages: number;
   pages: NativeParsedPage[];
   text: string;
   images: NativeExtractedImage[];

@@ -311,6 +311,8 @@ export interface JsFormField {
   selectedOptions: Array<string>
 }
 export interface JsParseResult {
+  /** Total source-document pages before target/max-page filtering. */
+  totalPages: number
   pages: Array<JsParsedPage>
   text: string
   images: Array<JsExtractedImage>

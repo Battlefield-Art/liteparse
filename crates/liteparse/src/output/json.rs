@@ -66,6 +66,7 @@ pub(crate) struct JsonPage {
 
 #[derive(Debug, Serialize)]
 pub(crate) struct ParseResultJson {
+    pub total_pages: u32,
     pub pages: Vec<JsonPage>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub images: Vec<JsonImage>,
@@ -104,6 +105,7 @@ pub(crate) struct JsonImage {
 /// Build structured JSON output from parsed pages.
 pub(crate) fn build_json(pages: &[ParsedPage], extract_text_metadata: bool) -> ParseResultJson {
     ParseResultJson {
+        total_pages: pages.len().min(u32::MAX as usize) as u32,
         images: Vec::new(),
         image_error_count: 0,
         form_type: None,
@@ -168,6 +170,7 @@ pub fn format_json_result(
     extract_text_metadata: bool,
 ) -> Result<String, serde_json::Error> {
     let mut json = build_json(&result.pages, extract_text_metadata);
+    json.total_pages = result.total_pages;
     json.images = result
         .images
         .iter()
@@ -387,6 +390,7 @@ mod tests {
             bytes: std::sync::Arc::new(vec![1, 2, 3]),
         };
         let result = crate::parser::ParseResult {
+            total_pages: 3,
             pages: vec![],
             text: String::new(),
             outline: vec![],
@@ -405,6 +409,7 @@ mod tests {
         };
         let value: serde_json::Value =
             serde_json::from_str(&format_json_result(&result, false).unwrap()).unwrap();
+        assert_eq!(value["total_pages"], 3);
         assert!(value.get("creator").is_none());
         assert!(value.get("producer").is_none());
         assert!(value.get("doc_meta").is_none());
