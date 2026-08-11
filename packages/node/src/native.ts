@@ -324,12 +324,13 @@ export interface NativeParseBatch {
 
 export interface NativeParseSession {
   nextBatch(): Promise<NativeParseBatch | null>;
+  close(): Promise<void>;
   readonly totalPages: number;
 }
 
 export interface LiteParseNative {
   parse(input: string | Buffer): Promise<NativeParseResult>;
-  open(
+  openBatchSession(
     input: string | Buffer,
     batchSize?: number,
   ): Promise<NativeParseSession>;

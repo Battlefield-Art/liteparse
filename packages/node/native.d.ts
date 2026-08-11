@@ -482,14 +482,16 @@ export declare class LiteParse {
   /** Parse a document. Accepts a file path (string) or raw PDF bytes (Buffer). */
   parse(input: string | Buffer): Promise<JsParseResult>
   /**
-   * Open a document for bounded-memory batch parsing.
+   * Open a document for bounded-memory batch parsing. Internal plumbing
+   * for the JS wrapper's `parseBatches()` — prefer that; it also closes
+   * the session for you.
    *
    * Converts a non-PDF source once, then yields `batchSize` pages at a time
    * via `nextBatch()` (default 25). Cross-page passes (repeated
    * header/footer removal, image deduplication) see only the pages in their
    * own batch, so output can differ from a whole-document `parse()`.
    */
-  open(input: string | Buffer, batchSize?: number | undefined | null): Promise<ParseSession>
+  openBatchSession(input: string | Buffer, batchSize?: number | undefined | null): Promise<ParseSession>
   /**
    * Parse from pre-extracted pages, skipping PDFium text extraction.
    *
@@ -518,18 +520,27 @@ export declare class LiteParse {
   get config(): JsLiteParseConfig
 }
 /**
- * A document opened once and parsed in bounded page batches.
+ * A document opened once and parsed in bounded page batches. Internal
+ * plumbing for the JS wrapper's `parseBatches()` — prefer that.
  *
- * Created by `LiteParse.open()`. The converted-PDF temporary file for a
- * non-PDF source lives as long as the session, so conversion is paid once no
- * matter how many batches are consumed.
+ * Created by `LiteParse.openBatchSession()`. The converted-PDF temporary
+ * file for a non-PDF source lives as long as the session, so conversion is
+ * paid once no matter how many batches are consumed. Call `close()` when
+ * abandoning the session early — otherwise that temp file waits for GC.
  */
 export declare class ParseSession {
   /** Total pages in the source document, before `maxPages` or batching. */
   get totalPages(): number
   /**
    * Parse and return the next batch, or `null` once every page within
-   * `maxPages` has been yielded.
+   * `maxPages` has been yielded. Rejects if the session is closed.
    */
   nextBatch(): Promise<JsParseBatch | null>
+  /**
+   * Release the session's resources now — most importantly the converted
+   * temporary PDF for a non-PDF source, which otherwise lives until the
+   * JS object is garbage collected. Idempotent; `nextBatch()` rejects
+   * afterwards.
+   */
+  close(): Promise<void>
 }

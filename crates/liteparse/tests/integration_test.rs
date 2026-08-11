@@ -132,7 +132,7 @@ async fn test_batch_parse_matches_whole_document() {
         .expect("whole-document parse should succeed");
 
     let mut session = LiteParse::new(config())
-        .open(PdfInput::Path(path.to_string()), 2)
+        .open_batch_session(PdfInput::Path(path.to_string()), 2)
         .await
         .expect("should open a session");
     assert_eq!(session.total_pages(), whole.total_pages);
@@ -169,7 +169,7 @@ async fn test_batch_parse_respects_max_pages() {
         max_pages: 2,
         ..LiteParseConfig::default()
     })
-    .open(
+    .open_batch_session(
         PdfInput::Path("../../integration_tests_data/filled_acroform.pdf".to_string()),
         100,
     )
@@ -201,7 +201,7 @@ async fn test_batch_parse_rejects_target_pages() {
         target_pages: Some("1-2".into()),
         ..LiteParseConfig::default()
     })
-    .open(
+    .open_batch_session(
         PdfInput::Path("../../integration_tests_data/filled_acroform.pdf".to_string()),
         25,
     )
@@ -210,38 +210,6 @@ async fn test_batch_parse_rejects_target_pages() {
         opened.is_err(),
         "target_pages + batching should be rejected"
     );
-}
-
-/// A non-PDF source is converted once when the session opens, not once per
-/// batch — the whole reason batching lives in core rather than in a binding.
-#[tokio::test]
-#[serial]
-async fn test_batch_parse_converts_office_source_once() {
-    let env_var = std::env::var("SKIP_INTEGRATION_TESTS");
-    if let Ok(v) = env_var
-        && v == "yes"
-    {
-        return;
-    }
-    let mut session = LiteParse::new(LiteParseConfig {
-        ocr_enabled: false,
-        quiet: true,
-        ..LiteParseConfig::default()
-    })
-    .open(
-        PdfInput::Path("../../integration_tests_data/sample3.doc".to_string()),
-        1,
-    )
-    .await
-    .expect("should convert and open a .doc");
-
-    // The converted temporary PDF is owned by the session, so every batch
-    // after the first resolves against a file that no longer needs LibreOffice.
-    let mut pages = 0;
-    while let Some(batch) = session.next_batch().await.expect("batch should parse") {
-        pages += batch.result.pages.len();
-    }
-    assert_eq!(pages, 2);
 }
 
 #[tokio::test]

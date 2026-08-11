@@ -1110,7 +1110,8 @@ impl LiteParse {
     /// Cross-page passes (repeated header/footer removal, image deduplication)
     /// see only the pages in their own batch, so output can differ from a
     /// whole-document `parse()`.
-    pub async fn open(
+    #[wasm_bindgen(js_name = openBatchSession)]
+    pub async fn open_batch_session(
         &self,
         data: Vec<u8>,
         batch_size: Option<usize>,
@@ -1118,7 +1119,7 @@ impl LiteParse {
         let batch_size = batch_size.unwrap_or(liteparse::DEFAULT_PAGE_BATCH_SIZE);
         let session = self
             .inner
-            .open(PdfInput::Bytes(data), batch_size)
+            .open_batch_session(PdfInput::Bytes(data), batch_size)
             .await
             .map_err(|e| JsError::new(&format!("open failed: {}", e)))?;
 
@@ -1144,8 +1145,9 @@ pub struct ParseBatch {
 
 /// A document opened once and parsed in bounded page batches.
 ///
-/// Created by `LiteParse.open()`. Call `nextBatch()` until it returns
-/// `undefined`.
+/// Created by `LiteParse.openBatchSession()`. Call `nextBatch()` until it
+/// returns `undefined`, then `free()` the session to release its wasm-side
+/// memory promptly (wasm-bindgen objects are not garbage collected).
 #[wasm_bindgen]
 pub struct ParseSession {
     inner: liteparse::ParseSession,
@@ -1162,6 +1164,9 @@ impl ParseSession {
 
     /// Parse and return the next batch, or `undefined` once every page within
     /// `maxPages` has been yielded.
+    ///
+    /// Batches are parsed one at a time: await each call before making the
+    /// next (a concurrent call throws wasm-bindgen's recursive-borrow error).
     #[wasm_bindgen(js_name = nextBatch)]
     pub async fn next_batch(&mut self) -> Result<Option<ParseBatch>, JsError> {
         let batch = self

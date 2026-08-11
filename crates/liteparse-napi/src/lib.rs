@@ -48,14 +48,16 @@ impl LiteParse {
         Ok(JsParseResult::from_rust(&result, &self.config))
     }
 
-    /// Open a document for bounded-memory batch parsing.
+    /// Open a document for bounded-memory batch parsing. Internal plumbing
+    /// for the JS wrapper's `parseBatches()` — prefer that; it also closes
+    /// the session for you.
     ///
     /// Converts a non-PDF source once, then yields `batchSize` pages at a time
     /// via `nextBatch()` (default 25). Cross-page passes (repeated
     /// header/footer removal, image deduplication) see only the pages in their
     /// own batch, so output can differ from a whole-document `parse()`.
     #[napi]
-    pub async fn open(
+    pub async fn open_batch_session(
         &self,
         input: Either<String, Buffer>,
         batch_size: Option<u32>,
@@ -72,13 +74,13 @@ impl LiteParse {
 
         let session = self
             .inner
-            .open(pdf_input, batch_size)
+            .open_batch_session(pdf_input, batch_size)
             .await
             .map_err(|e| Error::from_reason(e.to_string()))?;
 
         Ok(ParseSession {
             total_pages: session.total_pages(),
-            inner: std::sync::Arc::new(tokio::sync::Mutex::new(session)),
+            inner: std::sync::Arc::new(tokio::sync::Mutex::new(Some(session))),
             config: self.config.clone(),
         })
     }
@@ -169,17 +171,20 @@ impl LiteParse {
     }
 }
 
-/// A document opened once and parsed in bounded page batches.
+/// A document opened once and parsed in bounded page batches. Internal
+/// plumbing for the JS wrapper's `parseBatches()` — prefer that.
 ///
-/// Created by `LiteParse.open()`. The converted-PDF temporary file for a
-/// non-PDF source lives as long as the session, so conversion is paid once no
-/// matter how many batches are consumed.
+/// Created by `LiteParse.openBatchSession()`. The converted-PDF temporary
+/// file for a non-PDF source lives as long as the session, so conversion is
+/// paid once no matter how many batches are consumed. Call `close()` when
+/// abandoning the session early — otherwise that temp file waits for GC.
 #[napi]
 pub struct ParseSession {
     /// The core session is `&mut` per batch, but napi hands out `&self`, so
     /// the mutation is serialized here. Concurrent `nextBatch()` calls queue
     /// rather than interleave, which also keeps batch order well-defined.
-    inner: std::sync::Arc<tokio::sync::Mutex<liteparse::ParseSession>>,
+    /// `None` after `close()`.
+    inner: std::sync::Arc<tokio::sync::Mutex<Option<liteparse::ParseSession>>>,
     config: liteparse::config::LiteParseConfig,
     total_pages: u32,
 }
@@ -193,12 +198,14 @@ impl ParseSession {
     }
 
     /// Parse and return the next batch, or `null` once every page within
-    /// `maxPages` has been yielded.
+    /// `maxPages` has been yielded. Rejects if the session is closed.
     #[napi]
     pub async fn next_batch(&self) -> Result<Option<JsParseBatch>> {
         let inner = self.inner.clone();
         let mut session = inner.lock().await;
         let batch = session
+            .as_mut()
+            .ok_or_else(|| Error::from_reason("session is closed"))?
             .next_batch()
             .await
             .map_err(|e| Error::from_reason(e.to_string()))?;
@@ -208,6 +215,20 @@ impl ParseSession {
             end_page: batch.end_page,
             result: JsParseResult::from_rust(&batch.result, &self.config),
         }))
+    }
+
+    /// Release the session's resources now — most importantly the converted
+    /// temporary PDF for a non-PDF source, which otherwise lives until the
+    /// JS object is garbage collected. Idempotent; `nextBatch()` rejects
+    /// afterwards.
+    #[napi]
+    pub async fn close(&self) -> Result<()> {
+        let inner = self.inner.clone();
+        let mut session = inner.lock().await;
+        // Dropping the core session drops the conversion guard, which
+        // removes the temp file.
+        session.take();
+        Ok(())
     }
 }
 

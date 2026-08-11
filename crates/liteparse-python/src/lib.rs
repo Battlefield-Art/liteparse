@@ -1172,8 +1172,11 @@ impl PyLiteParseConfig {
 // Batch parsing
 // ---------------------------------------------------------------------------
 
-/// One batch of pages from a `ParseSession`.
-#[pyclass(frozen, name = "ParseBatch")]
+/// One batch of pages from a `_ParseSession`. Internal plumbing for the
+/// wrapper's `parse_batches()`, which converts it into the public
+/// `liteparse.types.ParseBatch` dataclass — the underscore name keeps the
+/// two from colliding.
+#[pyclass(frozen, name = "_ParseBatch", skip_from_py_object)]
 #[derive(Clone)]
 struct PyParseBatch {
     /// First source page in this batch (1-indexed).
@@ -1187,13 +1190,14 @@ struct PyParseBatch {
     result: PyParseResult,
 }
 
-/// A document opened once and parsed in bounded page batches.
+/// A document opened once and parsed in bounded page batches. Internal
+/// plumbing for the wrapper's `parse_batches()` — prefer that.
 ///
 /// Iterate it directly to consume every batch:
 ///
-///     for batch in parser.open("large.pdf", batch_size=20):
+///     for batch in parser.open_batch_session("large.pdf", batch_size=20):
 ///         handle(batch.result.pages)
-#[pyclass(name = "ParseSession", unsendable)]
+#[pyclass(name = "_ParseSession", unsendable)]
 struct PyParseSession {
     inner: liteparse::ParseSession,
     runtime: std::sync::Arc<tokio::runtime::Runtime>,
@@ -1464,13 +1468,14 @@ impl LiteParse {
     }
 
     /// Open a document from a file path for bounded-memory batch parsing.
+    /// Internal plumbing for the wrapper's `parse_batches()` — prefer that.
     ///
-    /// Converts a non-PDF source once and returns a `ParseSession` yielding
+    /// Converts a non-PDF source once and returns a `_ParseSession` yielding
     /// `batch_size` pages at a time. Cross-page passes (repeated header/footer
     /// removal, image deduplication) see only the pages in their own batch, so
     /// output can differ from a whole-document `parse()`.
     #[pyo3(signature = (input, batch_size = None))]
-    fn open(
+    fn open_batch_session(
         &self,
         py: Python<'_>,
         input: String,
@@ -1480,8 +1485,9 @@ impl LiteParse {
     }
 
     /// Open a document from raw bytes for bounded-memory batch parsing.
+    /// Internal plumbing for the wrapper's `parse_batches()` — prefer that.
     #[pyo3(signature = (data, batch_size = None))]
-    fn open_bytes(
+    fn open_batch_session_bytes(
         &self,
         py: Python<'_>,
         data: Vec<u8>,
@@ -1583,8 +1589,8 @@ impl LiteParse {
 }
 
 impl LiteParse {
-    /// Shared body of `open` / `open_bytes`. Not a `#[pymethods]` entry, so it
-    /// stays off the Python surface.
+    /// Shared body of `open_batch_session` / `open_batch_session_bytes`. Not
+    /// a `#[pymethods]` entry, so it stays off the Python surface.
     fn open_session(
         &self,
         py: Python<'_>,
@@ -1593,7 +1599,10 @@ impl LiteParse {
     ) -> PyResult<PyParseSession> {
         let batch_size = batch_size.unwrap_or(liteparse::DEFAULT_PAGE_BATCH_SIZE);
         let session = py
-            .detach(|| self.runtime.block_on(self.inner.open(input, batch_size)))
+            .detach(|| {
+                self.runtime
+                    .block_on(self.inner.open_batch_session(input, batch_size))
+            })
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
 
         Ok(PyParseSession {

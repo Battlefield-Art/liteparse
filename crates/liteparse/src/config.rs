@@ -259,7 +259,8 @@ fn default_num_workers() -> usize {
 /// input.
 const MAX_TARGET_PAGES: u64 = 100_000;
 
-/// Pages per batch when a caller of [`crate::parser::LiteParse::open`] does
+/// Pages per batch when a caller of
+/// [`crate::parser::LiteParse::open_batch_session`] does
 /// not pick a size. Small enough to keep the materialized result bounded;
 /// large enough that the per-batch document reopen stays modest (it costs
 /// roughly 13% at this size on a 457-page document, ~4% at 50).

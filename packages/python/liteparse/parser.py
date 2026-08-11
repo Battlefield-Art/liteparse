@@ -616,21 +616,34 @@ class LiteParse:
         Raises:
             ParseError: If parsing fails, or if the parser was constructed
                 with ``target_pages`` (ambiguous with generated batch ranges).
+                Open errors are raised here, when ``parse_batches`` is called;
+                per-batch parse errors are raised from the iterator.
             FileNotFoundError: If the file doesn't exist.
         """
+        # Validate and open eagerly — this is not a generator function, so a
+        # missing file or a target_pages conflict raises here rather than on
+        # the first iteration of the returned iterator.
         try:
             if isinstance(file_data, bytes):
-                session = self._native.open_bytes(file_data, batch_size)
+                session = self._native.open_batch_session_bytes(
+                    file_data, batch_size
+                )
             else:
                 file_path = Path(file_data)
                 if not file_path.exists():
                     raise FileNotFoundError(f"File not found: {file_path}")
-                session = self._native.open(str(file_path.absolute()), batch_size)
+                session = self._native.open_batch_session(
+                    str(file_path.absolute()), batch_size
+                )
         except FileNotFoundError:
             raise
         except Exception as e:
             raise ParseError(str(e)) from e
 
+        return self._iter_batches(session)
+
+    @staticmethod
+    def _iter_batches(session: Any) -> Iterator[ParseBatch]:
         total_pages = session.total_pages
         while True:
             try:

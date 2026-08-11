@@ -633,35 +633,49 @@ export class LiteParse {
    * Each yielded result is independent and becomes collectible once the caller
    * advances the iterator, so a consumer that does not retain batches never
    * holds more than one batch of pages in memory. A non-PDF source is
-   * converted once when the iterator starts, not once per batch.
+   * converted once when the iterator starts, not once per batch; its temporary
+   * file is released when iteration ends — including an early `break` or
+   * `throw`, which run the generator's cleanup.
    *
    * Cross-page passes see only the pages in their own batch, so repeated
    * header/footer removal and image deduplication are batch-local and the
    * output can differ from `parse()`. Prefer `parse()` unless the size of the
    * materialized result is the problem.
    *
-   * Throws if the parser is configured with `targetPages` — an explicit page
-   * selection and generated batch ranges are ambiguous together.
+   * As with any async generator, work starts on the first `next()` call, so
+   * errors (an unreadable file, or a parser configured with `targetPages` —
+   * ambiguous with generated batch ranges) surface on the first iteration
+   * rather than when `parseBatches()` itself is called.
    */
   async *parseBatches(
     input: LiteParseInput,
     options: ParseBatchOptions = {},
   ): AsyncGenerator<ParseBatch> {
     const nativeInput = typeof input === "string" ? input : Buffer.from(input);
-    const session = await this._native.open(nativeInput, options.batchSize);
-    const totalPages = session.totalPages;
+    const session = await this._native.openBatchSession(
+      nativeInput,
+      options.batchSize,
+    );
+    try {
+      const totalPages = session.totalPages;
 
-    for (;;) {
-      const batch = await session.nextBatch();
-      if (batch == null) {
-        return;
+      for (;;) {
+        const batch = await session.nextBatch();
+        if (batch == null) {
+          return;
+        }
+        yield {
+          startPage: batch.startPage,
+          endPage: batch.endPage,
+          totalPages,
+          result: toParseResult(batch.result),
+        };
       }
-      yield {
-        startPage: batch.startPage,
-        endPage: batch.endPage,
-        totalPages,
-        result: toParseResult(batch.result),
-      };
+    } finally {
+      // Frees the session's converted-PDF temp file now instead of at GC —
+      // this runs on normal exhaustion and when the consumer abandons the
+      // loop early.
+      await session.close();
     }
   }
 

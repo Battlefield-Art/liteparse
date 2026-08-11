@@ -895,7 +895,7 @@ impl LiteParse {
     ///
     /// Returns an error if `target_pages` is configured — an explicit page
     /// selection and generated batch ranges would be ambiguous together.
-    pub async fn open(
+    pub async fn open_batch_session(
         &self,
         input: PdfInput,
         batch_size: usize,
@@ -944,9 +944,9 @@ impl LiteParse {
 
 /// A document opened once and parsed in bounded page batches.
 ///
-/// Created by [`LiteParse::open`]. The converted-PDF temporary file (for
-/// non-PDF sources) lives as long as the session, so conversion is paid once
-/// no matter how many batches are consumed. The PDFium document itself is
+/// Created by [`LiteParse::open_batch_session`]. The converted-PDF temporary
+/// file (for non-PDF sources) lives as long as the session, so conversion is
+/// paid once no matter how many batches are consumed. The PDFium document is
 /// reopened per batch, which measures at a few percent of a batch's extraction
 /// cost and keeps the process-global PDFium lock free between batches.
 pub struct ParseSession {
@@ -1207,5 +1207,52 @@ mod tests {
         // refs and surrounding text are untouched.
         assert_eq!(pages[0].markdown, "intro\n\n![](img_p1_1.jpg)\n\noutro");
         assert_eq!(full_text, pages[0].markdown);
+    }
+
+    /// A non-PDF source is converted exactly once, when the session opens:
+    /// the converted temporary PDF outlives every batch and is only removed
+    /// when the session is dropped. Lives here rather than in the integration
+    /// tests because it asserts against [`ResolvedInput`] internals.
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn test_batch_session_owns_converted_source_for_its_lifetime() {
+        if std::env::var("SKIP_INTEGRATION_TESTS").as_deref() == Ok("yes") {
+            return;
+        }
+        let parser = LiteParse::new(LiteParseConfig {
+            ocr_enabled: false,
+            quiet: true,
+            ..LiteParseConfig::default()
+        });
+        let mut session = parser
+            .open_batch_session(
+                PdfInput::Path("../../integration_tests_data/sample3.doc".to_string()),
+                1,
+            )
+            .await
+            .expect("should convert and open a .doc");
+
+        assert!(session.input.is_converted());
+        let converted_path = match &session.input.input {
+            PdfInput::Path(p) => p.clone(),
+            PdfInput::Bytes(_) => panic!("a converted .doc should resolve to a temp file path"),
+        };
+
+        let mut pages = 0;
+        while let Some(batch) = session.next_batch().await.expect("batch should parse") {
+            pages += batch.result.pages.len();
+            assert!(
+                std::path::Path::new(&converted_path).exists(),
+                "converted temp PDF should outlive every batch — a missing file \
+                 would mean it was re-resolved or cleaned up per batch"
+            );
+        }
+        assert_eq!(pages, 2);
+
+        drop(session);
+        assert!(
+            !std::path::Path::new(&converted_path).exists(),
+            "dropping the session should clean up the converted temp PDF"
+        );
     }
 }
