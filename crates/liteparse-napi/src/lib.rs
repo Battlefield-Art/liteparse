@@ -4,8 +4,8 @@ use napi_derive::napi;
 mod types;
 
 use types::{
-    JsLiteParseConfig, JsPageComplexityStats, JsPageInput, JsParseResult, JsScreenshotResult,
-    JsTextItem,
+    JsLiteParseConfig, JsPageComplexityStats, JsPageInput, JsParseBatch, JsParseResult,
+    JsScreenshotResult, JsTextItem,
 };
 
 /// Main LiteParse parser class.
@@ -46,6 +46,41 @@ impl LiteParse {
             .map_err(|e| Error::from_reason(e.to_string()))?;
 
         Ok(JsParseResult::from_rust(&result, &self.config))
+    }
+
+    /// Open a document for bounded-memory batch parsing.
+    ///
+    /// Converts a non-PDF source once, then yields `batchSize` pages at a time
+    /// via `nextBatch()` (default 25). Cross-page passes (repeated
+    /// header/footer removal, image deduplication) see only the pages in their
+    /// own batch, so output can differ from a whole-document `parse()`.
+    #[napi]
+    pub async fn open(
+        &self,
+        input: Either<String, Buffer>,
+        batch_size: Option<u32>,
+    ) -> Result<ParseSession> {
+        use liteparse::types::PdfInput;
+
+        let pdf_input = match input {
+            Either::A(path) => PdfInput::Path(path),
+            Either::B(buf) => PdfInput::Bytes(buf.to_vec()),
+        };
+        let batch_size = batch_size
+            .map(|v| v as usize)
+            .unwrap_or(liteparse::DEFAULT_PAGE_BATCH_SIZE);
+
+        let session = self
+            .inner
+            .open(pdf_input, batch_size)
+            .await
+            .map_err(|e| Error::from_reason(e.to_string()))?;
+
+        Ok(ParseSession {
+            total_pages: session.total_pages(),
+            inner: std::sync::Arc::new(tokio::sync::Mutex::new(session)),
+            config: self.config.clone(),
+        })
     }
 
     /// Parse from pre-extracted pages, skipping PDFium text extraction.
@@ -131,6 +166,48 @@ impl LiteParse {
     #[napi(getter)]
     pub fn config(&self) -> JsLiteParseConfig {
         JsLiteParseConfig::from_rust(&self.config)
+    }
+}
+
+/// A document opened once and parsed in bounded page batches.
+///
+/// Created by `LiteParse.open()`. The converted-PDF temporary file for a
+/// non-PDF source lives as long as the session, so conversion is paid once no
+/// matter how many batches are consumed.
+#[napi]
+pub struct ParseSession {
+    /// The core session is `&mut` per batch, but napi hands out `&self`, so
+    /// the mutation is serialized here. Concurrent `nextBatch()` calls queue
+    /// rather than interleave, which also keeps batch order well-defined.
+    inner: std::sync::Arc<tokio::sync::Mutex<liteparse::ParseSession>>,
+    config: liteparse::config::LiteParseConfig,
+    total_pages: u32,
+}
+
+#[napi]
+impl ParseSession {
+    /// Total pages in the source document, before `maxPages` or batching.
+    #[napi(getter)]
+    pub fn total_pages(&self) -> u32 {
+        self.total_pages
+    }
+
+    /// Parse and return the next batch, or `null` once every page within
+    /// `maxPages` has been yielded.
+    #[napi]
+    pub async fn next_batch(&self) -> Result<Option<JsParseBatch>> {
+        let inner = self.inner.clone();
+        let mut session = inner.lock().await;
+        let batch = session
+            .next_batch()
+            .await
+            .map_err(|e| Error::from_reason(e.to_string()))?;
+
+        Ok(batch.map(|batch| JsParseBatch {
+            start_page: batch.start_page,
+            end_page: batch.end_page,
+            result: JsParseResult::from_rust(&batch.result, &self.config),
+        }))
     }
 }
 

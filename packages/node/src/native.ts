@@ -316,8 +316,23 @@ export interface NativePageComplexityStats {
   layout?: NativeLayoutComplexityStats;
 }
 
+export interface NativeParseBatch {
+  startPage: number;
+  endPage: number;
+  result: NativeParseResult;
+}
+
+export interface NativeParseSession {
+  nextBatch(): Promise<NativeParseBatch | null>;
+  readonly totalPages: number;
+}
+
 export interface LiteParseNative {
   parse(input: string | Buffer): Promise<NativeParseResult>;
+  open(
+    input: string | Buffer,
+    batchSize?: number,
+  ): Promise<NativeParseSession>;
   parsePages(pages: NativePageInput[]): NativeParseResult;
   isComplex(input: string | Buffer): Promise<NativePageComplexityStats[]>;
   screenshot(

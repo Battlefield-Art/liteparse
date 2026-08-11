@@ -38,8 +38,14 @@ for await (const batch of parser.parseBatches('large.pdf', { batchSize: 20 })) {
 }
 ```
 
-The document is reopened for each batch. Header/footer detection and image
-deduplication are therefore batch-local.
+Each batch is an ordinary parse result covering `batch.startPage` through
+`batch.endPage`, and becomes collectible as soon as you advance the iterator.
+A non-PDF source is converted once, not once per batch.
+
+Cross-page passes only see the pages in their own batch, so repeated
+header/footer removal and image deduplication are batch-local and the output
+can differ from `parse()`. Prefer `parse()` unless the size of the
+materialized result is the problem.
 
 ## Markdown Output
 

@@ -265,6 +265,19 @@ class ParseResult:
     #: Raw XFA packets; present only when ``extract_xfa_packets=True``.
     xfa_packets: Optional[List[XfaPacket]] = None
 
+
+@dataclass
+class ParseBatch:
+    """One batch of pages from :meth:`LiteParse.parse_batches`."""
+    #: First source page in this batch (1-indexed).
+    start_page: int
+    #: Last source page in this batch (1-indexed, inclusive).
+    end_page: int
+    #: Total source-document pages, before the parser's ``max_pages`` cap.
+    total_pages: int
+    #: The pages in ``start_page..end_page``, as an ordinary parse result.
+    result: ParseResult
+
     @property
     def num_pages(self) -> int:
         return len(self.pages)

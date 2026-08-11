@@ -51,6 +51,11 @@ export interface JsLiteParseConfig {
    * (default true). Set false for plain anchor text.
    */
   extractLinks?: boolean
+  /**
+   * Keep running headers/footers in markdown output instead of stripping
+   * repeated page-band lines and page chrome (default false).
+   */
+  keepHeadersFooters?: boolean
   /** Extract all PDF annotations as page-scoped structured data. */
   extractAnnotations?: boolean
   /** Extract AcroForm widget fields and values. */
@@ -62,6 +67,11 @@ export interface JsLiteParseConfig {
    * `ParseResult.xfaPackets`. Default false.
    */
   extractXfaPackets?: boolean
+  /**
+   * Collect document provenance metadata into `ParseResult.docMeta`.
+   * Default false: it streams the whole source file once. Absent for
+   * inputs converted from a non-PDF format.
+   */
   extractDocumentMetadata?: boolean
   /**
    * Emit each page's `contentBounds` (union bbox of top-level content
@@ -73,7 +83,10 @@ export interface JsLiteParseConfig {
    * them to each screenshot result. Default false.
    */
   detectScreenshotRects?: boolean
-  /** Draw AcroForm field appearances into rendered rasters (runs document open/JS actions). Default false. */
+  /**
+   * Draw AcroForm field appearances into rendered rasters (screenshots and
+   * OCR inputs). Runs the document's open/JS actions. Default false.
+   */
   renderFormFields?: boolean
   /**
    * Whether a systemic OCR failure aborts the whole parse (default true).
@@ -156,6 +169,7 @@ export interface JsTextItem {
   charCodes?: Array<number>
   /** True when the trailing source space was synthesized by PDFium. */
   trailingSpaceGenerated?: boolean
+  /** OCR confidence score (0.0-1.0). Undefined for native PDF text. */
   confidence?: number
   /** Rotation in degrees (viewport space). Defaults to 0 when omitted. */
   rotation?: number
@@ -330,6 +344,15 @@ export interface JsParseResult {
   /** Raw XFA packets; present only when `extractXfaPackets` is enabled. */
   xfaPackets?: Array<JsXfaPacket>
 }
+/** One batch of pages from a `ParseSession`. */
+export interface JsParseBatch {
+  /** First source page in this batch, 1-indexed. */
+  startPage: number
+  /** Last source page in this batch, 1-indexed and inclusive. */
+  endPage: number
+  /** The pages in `startPage..=endPage`, as an ordinary parse result. */
+  result: JsParseResult
+}
 export interface JsDocumentMetadata {
   creationDate?: string
   modDate?: string
@@ -342,6 +365,7 @@ export interface JsDocumentMetadata {
   trailerIdPairDiffers?: boolean
   rawFileSize?: number
   xmp?: string
+  /** True when the catalog's XMP stream exceeded the 64 KiB cap. */
   xmpTruncated?: boolean
   signatureCount?: number
   signatureByteRangeReachesEof?: boolean
@@ -415,9 +439,29 @@ export interface JsPageComplexityStats {
   textLength: number
   textCoverage: number
   hasSubstantialImages: boolean
+  /**
+   * Number of counted raster images — inline figures only; full-page
+   * backgrounds are excluded (see `fullPageImage`).
+   */
   imageBlockCount: number
+  /**
+   * Summed image-bbox area over page area, clamped to 1. Counts inline
+   * figures only: a full-page scan raster contributes 0 here — check
+   * `fullPageImage` for that.
+   */
   imageCoverage: number
+  /**
+   * Largest single counted image's area over page area, clamped to 1. Same
+   * exclusion as `imageCoverage`: a full-page raster contributes 0.
+   */
   largestImageCoverage: number
+  /**
+   * A single raster covering ≥90% of the page is present. Such full-page
+   * backgrounds are excluded from `imageCoverage`/`largestImageCoverage`
+   * (they're not inline figures), so this flag is the only signal that
+   * distinguishes a scan from a genuinely blank page — both otherwise
+   * report no text and no counted images.
+   */
   fullPageImage: boolean
   uncoveredVectorArea?: number
   isGarbled: boolean
@@ -437,6 +481,15 @@ export declare class LiteParse {
   constructor(config?: JsLiteParseConfig | undefined | null)
   /** Parse a document. Accepts a file path (string) or raw PDF bytes (Buffer). */
   parse(input: string | Buffer): Promise<JsParseResult>
+  /**
+   * Open a document for bounded-memory batch parsing.
+   *
+   * Converts a non-PDF source once, then yields `batchSize` pages at a time
+   * via `nextBatch()` (default 25). Cross-page passes (repeated
+   * header/footer removal, image deduplication) see only the pages in their
+   * own batch, so output can differ from a whole-document `parse()`.
+   */
+  open(input: string | Buffer, batchSize?: number | undefined | null): Promise<ParseSession>
   /**
    * Parse from pre-extracted pages, skipping PDFium text extraction.
    *
@@ -463,4 +516,20 @@ export declare class LiteParse {
   screenshot(input: string | Buffer, pageNumbers?: Array<number> | undefined | null): Promise<Array<JsScreenshotResult>>
   /** Get the current configuration. */
   get config(): JsLiteParseConfig
+}
+/**
+ * A document opened once and parsed in bounded page batches.
+ *
+ * Created by `LiteParse.open()`. The converted-PDF temporary file for a
+ * non-PDF source lives as long as the session, so conversion is paid once no
+ * matter how many batches are consumed.
+ */
+export declare class ParseSession {
+  /** Total pages in the source document, before `maxPages` or batching. */
+  get totalPages(): number
+  /**
+   * Parse and return the next batch, or `null` once every page within
+   * `maxPages` has been yielded.
+   */
+  nextBatch(): Promise<JsParseBatch | null>
 }

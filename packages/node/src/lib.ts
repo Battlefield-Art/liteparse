@@ -371,19 +371,19 @@ export interface ParseResult {
   xfaPackets?: XfaPacket[];
 }
 
+export interface ParseBatchOptions {
+  /** Pages materialized in one batch. Default: 25. */
+  batchSize?: number;
+}
+
 export interface ParseBatch {
   /** First source page in this batch (1-indexed). */
   startPage: number;
-  /** Last source page requested for this batch (1-indexed). */
+  /** Last source page in this batch (1-indexed, inclusive). */
   endPage: number;
   /** Total source-document pages, before the parser's `maxPages` cap. */
   totalPages: number;
   result: ParseResult;
-}
-
-export interface ParseBatchOptions {
-  /** Maximum pages materialized in one result. Default: 25. */
-  batchSize?: number;
 }
 
 /** Provenance and tamper-analysis facts extracted from the source PDF. */
@@ -624,77 +624,44 @@ export class LiteParse {
     const nativeInput =
       typeof input === "string" ? input : Buffer.from(input);
     const result: NativeParseResult = await this._native.parse(nativeInput);
-    return {
-      totalPages: result.totalPages,
-      pages: result.pages.map(toPage),
-      text: result.text,
-      images: (result.images ?? []).map(toImage),
-      imageErrorCount: result.imageErrorCount ?? 0,
-      formType: result.formType,
-      creator: result.creator,
-      producer: result.producer,
-      docMeta: result.docMeta,
-      xfaPackets: result.xfaPackets,
-    };
+    return toParseResult(result);
   }
 
   /**
-   * Parse a document in bounded-memory page batches.
+   * Parse a document in bounded-memory page batches of `batchSize` pages.
    *
-   * Each yielded result is independent and becomes collectible when the
-   * caller advances the iterator. The document is reopened for each batch;
-   * this trades a small amount of repeated setup for a bounded JS object
-   * graph on documents with many text items. Do not retain prior results if
-   * bounded memory is required.
+   * Each yielded result is independent and becomes collectible once the caller
+   * advances the iterator, so a consumer that does not retain batches never
+   * holds more than one batch of pages in memory. A non-PDF source is
+   * converted once when the iterator starts, not once per batch.
    *
-   * Batch-local layout operations (including repeated header/footer removal
-   * and image deduplication) do not see pages outside their batch. A parser
-   * configured with `targetPages` is rejected because its selection would be
-   * ambiguous with the ranges generated here.
+   * Cross-page passes see only the pages in their own batch, so repeated
+   * header/footer removal and image deduplication are batch-local and the
+   * output can differ from `parse()`. Prefer `parse()` unless the size of the
+   * materialized result is the problem.
+   *
+   * Throws if the parser is configured with `targetPages` — an explicit page
+   * selection and generated batch ranges are ambiguous together.
    */
   async *parseBatches(
     input: LiteParseInput,
     options: ParseBatchOptions = {},
   ): AsyncGenerator<ParseBatch> {
-    if (this._config.targetPages != null) {
-      throw new Error(
-        "parseBatches cannot be used when targetPages is configured",
-      );
-    }
-    const batchSize = options.batchSize ?? 25;
-    if (
-      !Number.isSafeInteger(batchSize) ||
-      batchSize <= 0 ||
-      batchSize > 100_000
-    ) {
-      throw new RangeError("batchSize must be an integer between 1 and 100000");
-    }
+    const nativeInput = typeof input === "string" ? input : Buffer.from(input);
+    const session = await this._native.open(nativeInput, options.batchSize);
+    const totalPages = session.totalPages;
 
-    let startPage = 1;
-    let pageLimit = this._config.maxPages;
-    while (startPage <= pageLimit) {
-      const requestedEndPage = Math.min(
-        startPage + batchSize - 1,
-        pageLimit,
-      );
-      const batchParser = new LiteParse({
-        ...this._config,
-        maxPages: batchSize,
-        targetPages: `${startPage}-${requestedEndPage}`,
-      });
-      const result = await batchParser.parse(input);
-      if (!Number.isSafeInteger(result.totalPages)) {
-        throw new Error(
-          "parseBatches requires a native LiteParse binary that exposes totalPages",
-        );
-      }
-      pageLimit = Math.min(result.totalPages, this._config.maxPages);
-      if (result.pages.length === 0) {
+    for (;;) {
+      const batch = await session.nextBatch();
+      if (batch == null) {
         return;
       }
-      const endPage = Math.min(requestedEndPage, pageLimit);
-      yield { startPage, endPage, totalPages: result.totalPages, result };
-      startPage = endPage + 1;
+      yield {
+        startPage: batch.startPage,
+        endPage: batch.endPage,
+        totalPages,
+        result: toParseResult(batch.result),
+      };
     }
   }
 
@@ -788,6 +755,21 @@ function toComplexity(s: NativePageComplexityStats): PageComplexityStats {
           reasons: s.layout.reasons,
         }
       : undefined,
+  };
+}
+
+function toParseResult(result: NativeParseResult): ParseResult {
+  return {
+    totalPages: result.totalPages,
+    pages: result.pages.map(toPage),
+    text: result.text,
+    images: (result.images ?? []).map(toImage),
+    imageErrorCount: result.imageErrorCount ?? 0,
+    formType: result.formType,
+    creator: result.creator,
+    producer: result.producer,
+    docMeta: result.docMeta,
+    xfaPackets: result.xfaPackets,
   };
 }
 
