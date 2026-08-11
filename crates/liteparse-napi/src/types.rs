@@ -899,6 +899,17 @@ pub struct JsParseResult {
     pub xfa_packets: Option<Vec<JsXfaPacket>>,
 }
 
+/// One batch of pages from a `ParseSession`.
+#[napi(object)]
+pub struct JsParseBatch {
+    /// First source page in this batch, 1-indexed.
+    pub start_page: u32,
+    /// Last source page in this batch, 1-indexed and inclusive.
+    pub end_page: u32,
+    /// The pages in `startPage..=endPage`, as an ordinary parse result.
+    pub result: JsParseResult,
+}
+
 #[napi(object)]
 #[derive(Clone)]
 pub struct JsDocumentMetadata {

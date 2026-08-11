@@ -278,6 +278,19 @@ class ParseResult:
 
 
 @dataclass
+class ParseBatch:
+    """One batch of pages from :meth:`LiteParse.parse_batches`."""
+    #: First source page in this batch (1-indexed).
+    start_page: int
+    #: Last source page in this batch (1-indexed, inclusive).
+    end_page: int
+    #: Total source-document pages, before the parser's ``max_pages`` cap.
+    total_pages: int
+    #: The pages in ``start_page..end_page``, as an ordinary parse result.
+    result: ParseResult
+
+
+@dataclass
 class ScreenshotRect:
     """One solid rectangle (or line) detected in a rendered page bitmap,
     in viewport coords (top-left origin, 72 DPI)."""

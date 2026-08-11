@@ -114,6 +114,104 @@ async fn test_total_pages_precedes_target_page_filtering() {
     assert_eq!(parsed.pages[0].page_number, 2);
 }
 
+/// Batching must not change what any individual page parses to — only how many
+/// pages are materialized at once.
+#[tokio::test]
+#[serial]
+async fn test_batch_parse_matches_whole_document() {
+    let config = || LiteParseConfig {
+        ocr_enabled: false,
+        quiet: true,
+        ..LiteParseConfig::default()
+    };
+    let path = "../../integration_tests_data/filled_acroform.pdf";
+
+    let whole = LiteParse::new(config())
+        .parse(path)
+        .await
+        .expect("whole-document parse should succeed");
+
+    let mut session = LiteParse::new(config())
+        .open_batch_session(PdfInput::Path(path.to_string()), 2)
+        .await
+        .expect("should open a session");
+    assert_eq!(session.total_pages(), whole.total_pages);
+
+    let mut batches = Vec::new();
+    while let Some(batch) = session.next_batch().await.expect("batch should parse") {
+        batches.push(batch);
+    }
+
+    // 3 pages at 2 per batch: [1-2], [3-3].
+    assert_eq!(batches.len(), 2);
+    assert_eq!((batches[0].start_page, batches[0].end_page), (1, 2));
+    assert_eq!((batches[1].start_page, batches[1].end_page), (3, 3));
+
+    let batched: Vec<_> = batches.iter().flat_map(|b| b.result.pages.iter()).collect();
+    assert_eq!(batched.len(), whole.pages.len());
+    for (got, want) in batched.iter().zip(&whole.pages) {
+        assert_eq!(got.page_number, want.page_number);
+        assert_eq!(got.text, want.text);
+    }
+    for batch in &batches {
+        assert_eq!(batch.result.total_pages, whole.total_pages);
+    }
+}
+
+/// `max_pages` bounds the session the same way it bounds a whole parse, and a
+/// batch size larger than the document collapses to a single batch.
+#[tokio::test]
+#[serial]
+async fn test_batch_parse_respects_max_pages() {
+    let mut session = LiteParse::new(LiteParseConfig {
+        ocr_enabled: false,
+        quiet: true,
+        max_pages: 2,
+        ..LiteParseConfig::default()
+    })
+    .open_batch_session(
+        PdfInput::Path("../../integration_tests_data/filled_acroform.pdf".to_string()),
+        100,
+    )
+    .await
+    .expect("should open a session");
+
+    let first = session
+        .next_batch()
+        .await
+        .expect("batch should parse")
+        .expect("a first batch");
+    assert_eq!(session.total_pages(), 3, "reports the source page count");
+    assert_eq!((first.start_page, first.end_page), (1, 2));
+    assert_eq!(first.result.pages.len(), 2);
+    assert!(
+        session.next_batch().await.expect("clean end").is_none(),
+        "max_pages should end the session before page 3"
+    );
+}
+
+/// An explicit page selection and generated batch ranges are ambiguous
+/// together, so the combination is rejected up front.
+#[tokio::test]
+#[serial]
+async fn test_batch_parse_rejects_target_pages() {
+    let opened = LiteParse::new(LiteParseConfig {
+        ocr_enabled: false,
+        quiet: true,
+        target_pages: Some("1-2".into()),
+        ..LiteParseConfig::default()
+    })
+    .open_batch_session(
+        PdfInput::Path("../../integration_tests_data/filled_acroform.pdf".to_string()),
+        25,
+    )
+    .await;
+    assert!(
+        opened.is_err(),
+        "target_pages + batching should be rejected"
+    );
+}
+
 #[tokio::test]
 #[serial]
 async fn test_parse_bytes_office_integration() {

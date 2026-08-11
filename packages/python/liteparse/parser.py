@@ -1,7 +1,7 @@
 """LiteParse Python wrapper - native Rust bindings via PyO3."""
 
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, Iterator, List, Optional, Tuple, Union
 
 from liteparse._liteparse import LiteParse as _NativeLiteParse
 from liteparse._liteparse import search_items as _native_search_items
@@ -18,6 +18,7 @@ from .types import (
     LiteParseConfig,
     PageComplexityStats,
     ParsedPage,
+    ParseBatch,
     ParseError,
     ParseResult,
     DocumentMetadata,
@@ -585,6 +586,78 @@ class LiteParse:
             raise
         except Exception as e:
             raise ParseError(str(e)) from e
+
+    def parse_batches(
+        self,
+        file_data: Union[str, Path, bytes],
+        batch_size: Optional[int] = None,
+    ) -> Iterator[ParseBatch]:
+        """
+        Parse a document in bounded-memory page batches.
+
+        Each yielded batch is an ordinary :class:`ParseResult` covering
+        ``batch.start_page`` through ``batch.end_page``, and becomes
+        collectible as soon as you advance the iterator — so a loop that does
+        not retain batches never holds more than one batch of pages in memory.
+        A non-PDF source is converted once, not once per batch.
+
+        Cross-page passes see only the pages in their own batch, so repeated
+        header/footer removal and image deduplication are batch-local and the
+        output can differ from :meth:`parse`. Prefer :meth:`parse` unless the
+        size of the materialized result is the problem.
+
+        Args:
+            file_data: Path to the document file, or raw PDF bytes.
+            batch_size: Pages materialized per batch (default 25).
+
+        Yields:
+            ParseBatch for each page range, in document order.
+
+        Raises:
+            ParseError: If parsing fails, or if the parser was constructed
+                with ``target_pages`` (ambiguous with generated batch ranges).
+                Open errors are raised here, when ``parse_batches`` is called;
+                per-batch parse errors are raised from the iterator.
+            FileNotFoundError: If the file doesn't exist.
+        """
+        # Validate and open eagerly — this is not a generator function, so a
+        # missing file or a target_pages conflict raises here rather than on
+        # the first iteration of the returned iterator.
+        try:
+            if isinstance(file_data, bytes):
+                session = self._native.open_batch_session_bytes(
+                    file_data, batch_size
+                )
+            else:
+                file_path = Path(file_data)
+                if not file_path.exists():
+                    raise FileNotFoundError(f"File not found: {file_path}")
+                session = self._native.open_batch_session(
+                    str(file_path.absolute()), batch_size
+                )
+        except FileNotFoundError:
+            raise
+        except Exception as e:
+            raise ParseError(str(e)) from e
+
+        return self._iter_batches(session)
+
+    @staticmethod
+    def _iter_batches(session: Any) -> Iterator[ParseBatch]:
+        total_pages = session.total_pages
+        while True:
+            try:
+                batch = session.next_batch()
+            except Exception as e:
+                raise ParseError(str(e)) from e
+            if batch is None:
+                return
+            yield ParseBatch(
+                start_page=batch.start_page,
+                end_page=batch.end_page,
+                total_pages=total_pages,
+                result=_convert_native_result(batch.result),
+            )
 
     def is_complex(
         self,

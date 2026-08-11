@@ -169,6 +169,33 @@ fn default_glyph_resolver() -> Option<std::sync::Arc<dyn crate::GlyphResolver>> 
     None
 }
 
+/// A document input already converted to PDF, if it needed converting.
+///
+/// Holds the [`conversion::PdfInputGuard`] so the temporary file produced for
+/// a DOCX/XLSX/PPTX/image source stays alive for as long as the resolved input
+/// is usable. Reusing one of these across several parses is what keeps batch
+/// parsing from re-running LibreOffice for every batch.
+pub(crate) struct ResolvedInput {
+    input: PdfInput,
+    #[cfg(not(target_arch = "wasm32"))]
+    guard: conversion::PdfInputGuard,
+}
+
+impl ResolvedInput {
+    /// True when `input` points at a temporary PDF we produced, so raw-file
+    /// provenance describes the intermediate rather than the caller's document.
+    fn is_converted(&self) -> bool {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            self.guard.is_converted()
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            false
+        }
+    }
+}
+
 /// Main LiteParse orchestrator.
 ///
 /// ### Thread safety
@@ -184,6 +211,7 @@ fn default_glyph_resolver() -> Option<std::sync::Arc<dyn crate::GlyphResolver>> 
 /// safe but their PDFium portions run sequentially. The OCR pass and grid
 /// projection (which dominate runtime for OCR-heavy documents) run outside
 /// the lock and remain fully concurrent.
+#[derive(Clone)]
 pub struct LiteParse {
     config: LiteParseConfig,
     /// Optional caller-provided OCR engine. When set, this overrides the
@@ -362,6 +390,54 @@ impl LiteParse {
     /// Use `PdfInput::Path` for files on disk or `PdfInput::Bytes` for
     /// in-memory PDF data (e.g. from a network response or Node.js Buffer).
     pub async fn parse_input(&self, input: PdfInput) -> Result<ParseResult, LiteParseError> {
+        self.validate_output_config()?;
+        let resolved = self.resolve_input(input).await?;
+        let target_pages = self.resolve_target_pages()?;
+        self.parse_resolved(
+            &resolved,
+            target_pages.as_deref(),
+            self.config.max_pages,
+            None,
+        )
+        .await
+    }
+
+    /// Convert a non-PDF input to PDF (if needed) and return it alongside the
+    /// guard that keeps any temporary file alive.
+    ///
+    /// Split out of [`LiteParse::parse_input`] so [`ParseSession`] can pay the
+    /// conversion cost once and reuse the result for every page batch.
+    async fn resolve_input(&self, input: PdfInput) -> Result<ResolvedInput, LiteParseError> {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let (input, guard) =
+                conversion::resolve_pdf_input(input, self.config.password.as_deref(), false)
+                    .await?;
+            Ok(ResolvedInput { input, guard })
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            Ok(ResolvedInput { input })
+        }
+    }
+
+    /// Parse an already-resolved input over an explicit page selection.
+    ///
+    /// `target_pages` and `max_pages` are parameters rather than config reads
+    /// so batch parsing can narrow the selection per batch.
+    ///
+    /// `outline` lets a caller that already walked the bookmark tree supply it
+    /// instead of paying for it again. The walk resolves a page destination per
+    /// entry, which costs several times more than opening the document, so a
+    /// batch parse that recomputed it per batch would spend most of its
+    /// overhead there.
+    async fn parse_resolved(
+        &self,
+        resolved: &ResolvedInput,
+        target_pages: Option<&[u32]>,
+        max_pages: usize,
+        outline: Option<Vec<OutlineTarget>>,
+    ) -> Result<ParseResult, LiteParseError> {
         let log = |msg: &str| {
             if !self.config.quiet {
                 eprintln!("{}", msg);
@@ -370,24 +446,11 @@ impl LiteParse {
 
         let t0 = web_time::Instant::now();
 
-        self.validate_output_config()?;
-
-        #[cfg(not(target_arch = "wasm32"))]
-        let (validated_input, _guard) =
-            conversion::resolve_pdf_input(input, self.config.password.as_deref(), false).await?;
-
         // Provenance facts describe the file on disk, so they are meaningless
         // for a PDF we generated ourselves from a DOCX/XLSX/image.
-        #[cfg(not(target_arch = "wasm32"))]
-        let want_doc_meta = self.config.extract_document_metadata && !_guard.is_converted();
-        #[cfg(target_arch = "wasm32")]
-        let want_doc_meta = self.config.extract_document_metadata;
+        let want_doc_meta = self.config.extract_document_metadata && !resolved.is_converted();
 
-        #[cfg(target_arch = "wasm32")]
-        let validated_input = input;
-
-        // Determine which pages to extract
-        let target_pages = self.resolve_target_pages()?;
+        let validated_input = &resolved.input;
 
         // Extract text (and pre-render OCR pages in one PDF load when OCR is on).
         // The PDFium lock is acquired for this entire critical section and
@@ -462,17 +525,13 @@ impl LiteParse {
                 .config
                 .extract_form_fields
                 .then(|| {
-                    crate::acroform_repair::repair_orphaned_widgets(
-                        &lib,
-                        &validated_input,
-                        password,
-                    )
+                    crate::acroform_repair::repair_orphaned_widgets(&lib, validated_input, password)
                 })
                 .flatten();
             #[cfg(not(target_arch = "wasm32"))]
-            let document_input = repaired_input.as_ref().unwrap_or(&validated_input);
+            let document_input = repaired_input.as_ref().unwrap_or(validated_input);
             #[cfg(target_arch = "wasm32")]
-            let document_input = &validated_input;
+            let document_input = validated_input;
             let document = extract::load_document_from_input(&lib, document_input, password)?;
             let total_pages = document.page_count().max(0) as u32;
             let form_type = self
@@ -487,11 +546,11 @@ impl LiteParse {
                 #[cfg(not(target_arch = "wasm32"))]
                 if repaired_input.is_some()
                     && let Ok(source) =
-                        extract::load_document_from_input(&lib, &validated_input, password)
+                        extract::load_document_from_input(&lib, validated_input, password)
                 {
-                    return crate::document_metadata::extract(&validated_input, &source);
+                    return crate::document_metadata::extract(validated_input, &source);
                 }
-                crate::document_metadata::extract(&validated_input, &document)
+                crate::document_metadata::extract(validated_input, &document)
             });
             let xfa_packets = self.config.extract_xfa_packets.then(|| {
                 document
@@ -510,11 +569,11 @@ impl LiteParse {
                     })
                     .collect::<Vec<_>>()
             });
-            let outline = extract::extract_outline(&document);
+            let outline = outline.unwrap_or_else(|| extract::extract_outline(&document));
             let extracted = extract::extract_pages_and_images(
                 &document,
-                target_pages.as_deref(),
-                self.config.max_pages,
+                target_pages,
+                max_pages,
                 self.config.extract_links
                     && self.config.output_format == crate::config::OutputFormat::Markdown,
                 self.glyph_resolver.as_deref(),
@@ -816,6 +875,118 @@ impl LiteParse {
     pub fn config(&self) -> &LiteParseConfig {
         &self.config
     }
+
+    /// Open a document for bounded-memory batch parsing.
+    ///
+    /// Returns an error if `target_pages` is configured — an explicit page
+    /// selection and generated batch ranges would be ambiguous together.
+    pub async fn open_batch_session(
+        &self,
+        input: PdfInput,
+        batch_size: usize,
+    ) -> Result<ParseSession, LiteParseError> {
+        self.validate_output_config()?;
+        if self.config.target_pages.is_some() {
+            return Err(LiteParseError::Config(
+                "batch parsing cannot be combined with target_pages".to_string(),
+            ));
+        }
+        if batch_size == 0 {
+            return Err(LiteParseError::Config(
+                "batch size must be at least 1".to_string(),
+            ));
+        }
+
+        let input = self.resolve_input(input).await?;
+        // One cheap open (a few ms even for a 100 MB file — PDFium maps the
+        // file and parses the xref rather than reading it) so the caller knows
+        // the page count before the first batch is parsed, and so the
+        // document-level bookmark walk is paid once instead of per batch.
+        let (total_pages, outline) = {
+            let lib = Library::init();
+            let document = extract::load_document_from_input(
+                &lib,
+                &input.input,
+                self.config.password.as_deref(),
+            )?;
+            (
+                document.page_count().max(0) as u32,
+                extract::extract_outline(&document),
+            )
+        };
+
+        Ok(ParseSession {
+            page_limit: total_pages.min(self.config.max_pages.min(u32::MAX as usize) as u32),
+            parser: self.clone(),
+            input,
+            total_pages,
+            outline,
+            next_page: 1,
+            batch_size,
+        })
+    }
+}
+
+/// A document opened once and parsed in bounded page batches.
+pub struct ParseSession {
+    parser: LiteParse,
+    input: ResolvedInput,
+    total_pages: u32,
+    /// Walked once at open. Document-level, so every batch reports the same
+    /// outline, and re-walking it per batch would dominate batching overhead.
+    outline: Vec<OutlineTarget>,
+    /// Last source page this session will parse: `min(total_pages, max_pages)`.
+    page_limit: u32,
+    /// Next source page to parse, 1-based.
+    next_page: u32,
+    batch_size: usize,
+}
+
+/// One batch of pages from a [`ParseSession`].
+pub struct ParseBatch {
+    /// First source page in this batch, 1-based.
+    pub start_page: u32,
+    /// Last source page in this batch, 1-based and inclusive.
+    pub end_page: u32,
+    /// The pages in `start_page..=end_page`, parsed as an ordinary result.
+    pub result: ParseResult,
+}
+
+impl ParseSession {
+    /// Total pages in the source document, before `max_pages` or batching.
+    pub fn total_pages(&self) -> u32 {
+        self.total_pages
+    }
+
+    /// Parse and return the next batch, or `None` once every page within
+    /// `max_pages` has been yielded.
+    pub async fn next_batch(&mut self) -> Result<Option<ParseBatch>, LiteParseError> {
+        if self.next_page > self.page_limit {
+            return Ok(None);
+        }
+        let start_page = self.next_page;
+        let end_page = start_page
+            .saturating_add(self.batch_size.min(u32::MAX as usize) as u32 - 1)
+            .min(self.page_limit);
+        let targets: Vec<u32> = (start_page..=end_page).collect();
+
+        let result = self
+            .parser
+            .parse_resolved(
+                &self.input,
+                Some(&targets),
+                targets.len(),
+                Some(self.outline.clone()),
+            )
+            .await?;
+
+        self.next_page = end_page.saturating_add(1);
+        Ok(Some(ParseBatch {
+            start_page,
+            end_page,
+            result,
+        }))
+    }
 }
 
 #[cfg(test)]
@@ -1015,5 +1186,52 @@ mod tests {
         // refs and surrounding text are untouched.
         assert_eq!(pages[0].markdown, "intro\n\n![](img_p1_1.jpg)\n\noutro");
         assert_eq!(full_text, pages[0].markdown);
+    }
+
+    /// A non-PDF source is converted exactly once, when the session opens:
+    /// the converted temporary PDF outlives every batch and is only removed
+    /// when the session is dropped. Lives here rather than in the integration
+    /// tests because it asserts against [`ResolvedInput`] internals.
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn test_batch_session_owns_converted_source_for_its_lifetime() {
+        if std::env::var("SKIP_INTEGRATION_TESTS").as_deref() == Ok("yes") {
+            return;
+        }
+        let parser = LiteParse::new(LiteParseConfig {
+            ocr_enabled: false,
+            quiet: true,
+            ..LiteParseConfig::default()
+        });
+        let mut session = parser
+            .open_batch_session(
+                PdfInput::Path("../../integration_tests_data/sample3.doc".to_string()),
+                1,
+            )
+            .await
+            .expect("should convert and open a .doc");
+
+        assert!(session.input.is_converted());
+        let converted_path = match &session.input.input {
+            PdfInput::Path(p) => p.clone(),
+            PdfInput::Bytes(_) => panic!("a converted .doc should resolve to a temp file path"),
+        };
+
+        let mut pages = 0;
+        while let Some(batch) = session.next_batch().await.expect("batch should parse") {
+            pages += batch.result.pages.len();
+            assert!(
+                std::path::Path::new(&converted_path).exists(),
+                "converted temp PDF should outlive every batch — a missing file \
+                 would mean it was re-resolved or cleaned up per batch"
+            );
+        }
+        assert_eq!(pages, 2);
+
+        drop(session);
+        assert!(
+            !std::path::Path::new(&converted_path).exists(),
+            "dropping the session should clean up the converted temp PDF"
+        );
     }
 }
