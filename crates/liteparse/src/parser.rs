@@ -878,21 +878,6 @@ impl LiteParse {
 
     /// Open a document for bounded-memory batch parsing.
     ///
-    /// Converts a non-PDF source once and returns a [`ParseSession`] that
-    /// yields `batch_size` pages at a time. Each batch is an ordinary
-    /// [`ParseResult`], so a caller that drops one before requesting the next
-    /// never holds more than one batch of pages in memory.
-    ///
-    /// `batch_size` is an argument rather than a config field because it only
-    /// means anything on this entry point — see
-    /// [`crate::config::DEFAULT_PAGE_BATCH_SIZE`] for a reasonable value.
-    ///
-    /// Prefer [`LiteParse::parse_input`] unless the document is large enough
-    /// that the materialized result is the problem: cross-page passes see only
-    /// the pages in their own batch, so repeated header/footer removal and
-    /// image deduplication are batch-local and the output can differ from a
-    /// whole-document parse.
-    ///
     /// Returns an error if `target_pages` is configured — an explicit page
     /// selection and generated batch ranges would be ambiguous together.
     pub async fn open_batch_session(
@@ -943,12 +928,6 @@ impl LiteParse {
 }
 
 /// A document opened once and parsed in bounded page batches.
-///
-/// Created by [`LiteParse::open_batch_session`]. The converted-PDF temporary
-/// file (for non-PDF sources) lives as long as the session, so conversion is
-/// paid once no matter how many batches are consumed. The PDFium document is
-/// reopened per batch, which measures at a few percent of a batch's extraction
-/// cost and keeps the process-global PDFium lock free between batches.
 pub struct ParseSession {
     parser: LiteParse,
     input: ResolvedInput,
