@@ -265,6 +265,17 @@ class ParseResult:
     #: Raw XFA packets; present only when ``extract_xfa_packets=True``.
     xfa_packets: Optional[List[XfaPacket]] = None
 
+    @property
+    def num_pages(self) -> int:
+        return len(self.pages)
+
+    def get_page(self, page_num: int) -> Optional[ParsedPage]:
+        """Get a specific page by number (1-indexed)."""
+        for page in self.pages:
+            if page.page_num == page_num:
+                return page
+        return None
+
 
 @dataclass
 class ParseBatch:
@@ -277,17 +288,6 @@ class ParseBatch:
     total_pages: int
     #: The pages in ``start_page..end_page``, as an ordinary parse result.
     result: ParseResult
-
-    @property
-    def num_pages(self) -> int:
-        return len(self.pages)
-
-    def get_page(self, page_num: int) -> Optional[ParsedPage]:
-        """Get a specific page by number (1-indexed)."""
-        for page in self.pages:
-            if page.page_num == page_num:
-                return page
-        return None
 
 
 @dataclass
