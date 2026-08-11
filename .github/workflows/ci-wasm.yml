@@ -113,7 +113,11 @@ jobs:
           path: packages/wasm/pkg/
 
       - name: Install Miniflare
-        run: npm install miniflare@latest
+        # Use the version pinned in the root package.json, not @latest:
+        # miniflare@latest currently resolves to a 5.x alpha whose
+        # `new Miniflare()` options schema is incompatible with the 4.x
+        # single-worker form used by scripts/edge-compat/wasm-test.mjs.
+        run: npm install --ignore-scripts
 
       - name: Run edge runtime parse test
         run: node scripts/edge-compat/wasm-test.mjs
