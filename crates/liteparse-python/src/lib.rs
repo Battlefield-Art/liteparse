@@ -600,6 +600,8 @@ struct PyParseResult {
     #[pyo3(get)]
     total_pages: u32,
     #[pyo3(get)]
+    total_pages: u32,
+    #[pyo3(get)]
     pages: Vec<PyParsedPage>,
     #[pyo3(get)]
     text: String,
