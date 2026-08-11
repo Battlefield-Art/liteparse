@@ -243,6 +243,17 @@ impl<'doc, 'lib: 'doc> Page<'doc, 'lib> {
         unsafe { ffi!(FPDFPage_GetRotation(self.handle)) }
     }
 
+    /// Page dimensions in the same rotation-adjusted viewport coordinate
+    /// space returned by [`Self::page_to_viewport`].
+    pub fn viewport_size(&self, view_box: &RectF) -> (f32, f32) {
+        let mut width = (view_box.right - view_box.left).abs();
+        let mut height = (view_box.top - view_box.bottom).abs();
+        if matches!(self.rotation(), 1 | 3) {
+            std::mem::swap(&mut width, &mut height);
+        }
+        (width, height)
+    }
+
     /// Get the page bounding box (CropBox, falls back to MediaBox).
     /// Coordinates in PDF page space.
     pub fn view_box(&self) -> Option<RectF> {
@@ -268,14 +279,7 @@ impl<'doc, 'lib: 'doc> Page<'doc, 'lib> {
     /// Convert a point from PDF page space to viewport space (top-left origin, 72 DPI).
     /// Mirrors the platform's Parse_pageToViewport using FPDF_PageToDevice at 1000x scale.
     pub fn page_to_viewport(&self, view_box: &RectF, page_x: f32, page_y: f32) -> (f32, f32) {
-        let mut vw = view_box.right - view_box.left;
-        let mut vh = view_box.top - view_box.bottom;
-
-        let rotation = self.rotation();
-        if rotation == 1 || rotation == 3 {
-            // 90° or 270° — swap viewport dimensions
-            std::mem::swap(&mut vw, &mut vh);
-        }
+        let (vw, vh) = self.viewport_size(view_box);
 
         let device_w = (vw * 1000.0).round() as i32;
         let device_h = (vh * 1000.0).round() as i32;

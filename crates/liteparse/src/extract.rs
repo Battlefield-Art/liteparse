@@ -114,14 +114,19 @@ pub(crate) fn extract_pages_and_images(
         }
 
         let page = document.page(page_index)?;
-        let page_width = page.width();
-        let page_height = page.height();
+        let raw_page_width = page.width();
+        let raw_page_height = page.height();
         let view_box = page.view_box().unwrap_or(RectF {
             left: 0.0,
-            top: page_height,
-            right: page_width,
+            top: raw_page_height,
+            right: raw_page_width,
             bottom: 0.0,
         });
+        // All extracted geometry is converted to the rotation-adjusted
+        // viewport coordinate space. Keep the page dimensions in that same
+        // space so projection, filtering, and consumers do not clip content
+        // at the unrotated MediaBox width on /Rotate 90 or /Rotate 270 pages.
+        let (page_width, page_height) = page.viewport_size(&view_box);
         // Once a qualifying widget is found, PDFium flattens every visible
         // annotation on the page. Collect every annotation-backed output first.
         let links = if extract_links {
@@ -1620,8 +1625,11 @@ fn extract_page_text_items(
     // PDFs carry the neighbouring page's text at x beyond the page edge in
     // the same content stream; viewers never show it. Partially-visible
     // items are kept.
-    let vb_w = (view_box.right - view_box.left).abs();
-    let vb_h = (view_box.top - view_box.bottom).abs();
+    // Item coordinates have already been transformed into the
+    // rotation-adjusted viewport. Clip against dimensions in that same space;
+    // using the raw CropBox dimensions here drops the right/bottom portion of
+    // /Rotate 90 and /Rotate 270 pages.
+    let (vb_w, vb_h) = page.viewport_size(view_box);
     let pre_clip_count = items.len();
     items.retain(|it| {
         it.x < vb_w
@@ -2701,6 +2709,89 @@ impl SegmentBuilder {
 mod tests {
     use super::*;
     use std::f32::consts::PI;
+
+    fn rotated_text_pdf() -> Vec<u8> {
+        let content =
+            b"BT /F1 10 Tf 20 40 Td (FIRSTMARK) Tj ET\nBT /F1 10 Tf 20 250 Td (SECONDMARK) Tj ET";
+        let objects: Vec<Vec<u8>> = vec![
+            b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
+            b"<< /Type /Pages /Kids [3 0 R 4 0 R] /Count 2 >>".to_vec(),
+            b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 300] /Rotate 90 /Resources << /Font << /F1 7 0 R >> >> /Contents 5 0 R >>".to_vec(),
+            b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 300] /Rotate 270 /Resources << /Font << /F1 7 0 R >> >> /Contents 6 0 R >>".to_vec(),
+            [
+                format!("<< /Length {} >>\nstream\n", content.len()).as_bytes(),
+                content,
+                b"\nendstream",
+            ]
+            .concat(),
+            [
+                format!("<< /Length {} >>\nstream\n", content.len()).as_bytes(),
+                content,
+                b"\nendstream",
+            ]
+            .concat(),
+            b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>".to_vec(),
+        ];
+        let mut pdf = b"%PDF-1.7\n".to_vec();
+        let mut offsets = Vec::with_capacity(objects.len());
+        for (index, object) in objects.iter().enumerate() {
+            offsets.push(pdf.len());
+            pdf.extend_from_slice(format!("{} 0 obj\n", index + 1).as_bytes());
+            pdf.extend_from_slice(object);
+            pdf.extend_from_slice(b"\nendobj\n");
+        }
+        let xref = pdf.len();
+        pdf.extend_from_slice(format!("xref\n0 {}\n", objects.len() + 1).as_bytes());
+        pdf.extend_from_slice(b"0000000000 65535 f \n");
+        for offset in offsets {
+            pdf.extend_from_slice(format!("{offset:010} 00000 n \n").as_bytes());
+        }
+        pdf.extend_from_slice(
+            format!(
+                "trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n",
+                objects.len() + 1
+            )
+            .as_bytes(),
+        );
+        pdf
+    }
+
+    #[test]
+    fn rotated_pages_use_viewport_dimensions_and_keep_edge_text() {
+        let pages =
+            extract_pages_from_input(&PdfInput::Bytes(rotated_text_pdf()), None, usize::MAX, None)
+                .unwrap();
+
+        assert_eq!(pages.len(), 2);
+        for page in &pages {
+            assert_eq!((page.page_width, page.page_height), (300.0, 200.0));
+            let raw_text = page
+                .text_items
+                .iter()
+                .map(|item| item.text.as_str())
+                .collect::<String>()
+                .replace(char::is_whitespace, "");
+            assert!(raw_text.contains("FIRSTMARK"), "raw text: {raw_text}");
+            assert!(raw_text.contains("SECONDMARK"), "raw text: {raw_text}");
+        }
+
+        let parsed = crate::projection::project_pages_to_grid(pages);
+        for page in parsed {
+            let text = page
+                .text_items
+                .iter()
+                .map(|item| item.text.as_str())
+                .collect::<String>()
+                .replace(char::is_whitespace, "");
+            assert!(text.contains("FIRSTMARK"), "extracted text: {text}");
+            assert!(text.contains("SECONDMARK"), "extracted text: {text}");
+            assert!(
+                page.text_items
+                    .iter()
+                    .all(|item| item.x + item.width <= page.page_width + 0.1)
+            );
+        }
+    }
 
     // A glyph PDFium flags with a raw /ToUnicode map error normally counts
     // toward the item's unmapped tally...
