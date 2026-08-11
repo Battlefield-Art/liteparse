@@ -596,9 +596,6 @@ impl PyParsedPage {
 #[pyclass(frozen, from_py_object)]
 #[derive(Clone)]
 struct PyParseResult {
-    /// Total source-document pages before target/max-page filtering.
-    #[pyo3(get)]
-    total_pages: u32,
     #[pyo3(get)]
     total_pages: u32,
     #[pyo3(get)]
