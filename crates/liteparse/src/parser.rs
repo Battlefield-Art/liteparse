@@ -11,7 +11,6 @@ use crate::ocr::tesseract::TesseractOcrEngine;
 use crate::ocr_merge;
 use crate::output::markdown;
 use crate::projection;
-#[cfg(not(target_arch = "wasm32"))]
 use crate::render;
 use crate::types::{
     DocumentMetadata, ExtractedImage, OutlineTarget, Page, PageError, ParsedPage, PdfInput,
@@ -39,6 +38,9 @@ pub struct ParseResult {
     /// `id` and `format` the markdown emitter referenced, so the caller can
     /// match them up without parsing markdown.
     pub images: Vec<ExtractedImage>,
+    /// Page screenshots encoded as PNG. Empty unless `extract_screenshots`
+    /// is enabled.
+    pub screenshots: Vec<ScreenshotResult>,
     /// Number of embedded image objects that could not be extracted. A bad
     /// image does not fail the rest of the document parse.
     pub image_error_count: u32,
@@ -534,6 +536,7 @@ impl LiteParse {
             ocr_rendered,
             outline,
             mut images,
+            screenshots,
             image_error_count,
             complexity,
             form_type,
@@ -629,12 +632,13 @@ impl LiteParse {
             // run document actions and paint computed field appearances that
             // have no appearance stream to flatten.
             //
-            // Plain OCR rendering does not need it — flattening promotes the
-            // widget appearances into page content, so the raster is the same
-            // either way. Complexity likewise runs on the flattened document
-            // by design (see `is_complex`).
-            let needs_pristine_document =
-                flattened_form_widgets && self.config.ocr_enabled && self.config.render_form_fields;
+            // Plain rendering (OCR rasters, screenshots) does not need it —
+            // flattening promotes the widget appearances into page content,
+            // so the raster is the same either way. Complexity likewise runs
+            // on the flattened document by design (see `is_complex`).
+            let needs_pristine_document = flattened_form_widgets
+                && (self.config.ocr_enabled || self.config.extract_screenshots)
+                && self.config.render_form_fields;
             let pristine_document = needs_pristine_document
                 .then(|| extract::load_document_from_input(&lib, document_input, password))
                 .transpose()?;
@@ -690,6 +694,32 @@ impl LiteParse {
             } else {
                 Vec::new()
             };
+            let screenshots = if self.config.extract_screenshots {
+                let page_numbers = pages
+                    .iter()
+                    .map(|page| page.page_number as u32)
+                    .collect::<Vec<_>>();
+                render::render_document_pages(
+                    analysis_document,
+                    Some(&page_numbers),
+                    self.config.dpi,
+                    self.config.detect_screenshot_rects,
+                    self.config.render_form_fields,
+                    self.config.continue_on_page_error,
+                )?
+                .into_iter()
+                .map(|page| ScreenshotResult {
+                    page_num: page.page_num,
+                    width: page.width,
+                    height: page.height,
+                    image_bytes: page.png_bytes,
+                    is_solid_fill: page.is_solid_fill,
+                    rects: page.rects,
+                })
+                .collect()
+            } else {
+                Vec::new()
+            };
             // `lib` is dropped here, releasing the PDFium lock.
             (
                 pages,
@@ -698,6 +728,7 @@ impl LiteParse {
                 rendered,
                 outline,
                 images,
+                screenshots,
                 image_error_count,
                 complexity,
                 form_type,
@@ -804,6 +835,7 @@ impl LiteParse {
             text: full_text,
             outline,
             images,
+            screenshots,
             image_error_count,
             form_type,
             creator,
@@ -852,6 +884,7 @@ impl LiteParse {
             text: full_text,
             outline,
             images: Vec::new(),
+            screenshots: Vec::new(),
             image_error_count: 0,
             form_type: None,
             creator: None,

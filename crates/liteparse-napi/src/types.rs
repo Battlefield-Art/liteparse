@@ -32,6 +32,9 @@ pub struct JsLiteParseConfig {
     pub max_pages: Option<u32>,
     /// Specific pages to parse (e.g., "1-5,10,15-20").
     pub target_pages: Option<String>,
+    /// Render parsed pages to PNG and return them in `ParseResult.screenshots`.
+    /// Default false; PNG payloads can be large.
+    pub extract_screenshots: Option<bool>,
     /// Continue after page-level extraction failures and return them in
     /// `ParseResult.pageErrors`. Default false.
     pub continue_on_page_error: Option<bool>,
@@ -148,6 +151,9 @@ impl JsLiteParseConfig {
         if let Some(v) = self.target_pages {
             cfg.target_pages = Some(v);
         }
+        if let Some(v) = self.extract_screenshots {
+            cfg.extract_screenshots = v;
+        }
         if let Some(v) = self.continue_on_page_error {
             cfg.continue_on_page_error = v;
         }
@@ -261,6 +267,7 @@ impl JsLiteParseConfig {
             tessdata_path: cfg.tessdata_path.clone(),
             max_pages: Some(cfg.max_pages as u32),
             target_pages: cfg.target_pages.clone(),
+            extract_screenshots: Some(cfg.extract_screenshots),
             continue_on_page_error: Some(cfg.continue_on_page_error),
             dpi: Some(cfg.dpi as f64),
             output_format: Some(match cfg.output_format {
@@ -894,6 +901,7 @@ pub struct JsParseResult {
     pub page_errors: Vec<JsPageError>,
     pub text: String,
     pub images: Vec<JsExtractedImage>,
+    pub screenshots: Vec<JsScreenshotResult>,
     pub image_error_count: u32,
     pub form_type: Option<i32>,
     /// The document's `/Info` `Creator` entry, when present.
@@ -1059,6 +1067,23 @@ impl JsScreenshotRect {
     }
 }
 
+impl JsScreenshotResult {
+    pub fn from_rust(result: &liteparse::parser::ScreenshotResult) -> Self {
+        Self {
+            page_num: result.page_num,
+            width: result.width,
+            height: result.height,
+            image_buffer: result.image_bytes.clone().into(),
+            is_solid_fill: result.is_solid_fill,
+            rects: result
+                .rects
+                .iter()
+                .map(JsScreenshotRect::from_rust)
+                .collect(),
+        }
+    }
+}
+
 #[napi(object)]
 #[derive(Clone)]
 pub struct JsLayoutComplexityStats {
@@ -1198,6 +1223,11 @@ impl JsParseResult {
                     duplicate_of: img.duplicate_of.clone(),
                     bytes: img.bytes.as_slice().to_vec().into(),
                 })
+                .collect(),
+            screenshots: result
+                .screenshots
+                .iter()
+                .map(JsScreenshotResult::from_rust)
                 .collect(),
         }
     }

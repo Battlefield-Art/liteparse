@@ -258,6 +258,7 @@ class ParseResult:
     #: Total source-document pages before target/max-page filtering.
     total_pages: int = 0
     images: List[ExtractedImage] = field(default_factory=list)
+    screenshots: List["ScreenshotResult"] = field(default_factory=list)
     image_error_count: int = 0
     page_errors: List[PageError] = field(default_factory=list)
     #: PDFium form type, present only when ``extract_form_fields=True``.
@@ -405,6 +406,7 @@ class LiteParseConfig:
     tessdata_path: Optional[str]
     max_pages: int
     target_pages: Optional[str]
+    extract_screenshots: bool
     continue_on_page_error: bool
     dpi: float
     output_format: str

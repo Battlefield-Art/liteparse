@@ -46,15 +46,17 @@ pub fn render_pages_to_png(
         dpi,
         detect_rects,
         render_form_fields,
+        false,
     )
 }
 
-fn render_document_pages(
+pub(crate) fn render_document_pages(
     document: &pdfium::Document,
     page_numbers: Option<&[u32]>,
     dpi: f32,
     detect_rects: bool,
     render_form_fields: bool,
+    continue_on_page_error: bool,
 ) -> Result<Vec<RenderedPage>, LiteParseError> {
     let page_count = document.page_count() as u32;
     let pages: Vec<u32> = match page_numbers {
@@ -71,43 +73,55 @@ fn render_document_pages(
 
     let mut results = Vec::with_capacity(pages.len());
     for page_num in pages {
-        if page_num < 1 || page_num > page_count {
-            return Err(LiteParseError::Other(format!(
-                "page {page_num} out of range (document has {page_count} pages)"
-            )));
+        let page_render = (|| -> Result<RenderedPage, LiteParseError> {
+            if page_num < 1 || page_num > page_count {
+                return Err(LiteParseError::Other(format!(
+                    "page {page_num} out of range (document has {page_count} pages)"
+                )));
+            }
+
+            let page = document.page((page_num - 1) as i32)?;
+            let bitmap = page.render_with_form(dpi, form.as_ref())?;
+            let width = bitmap.width() as u32;
+            let height = bitmap.height() as u32;
+            let rgba = bitmap.to_rgba();
+
+            let is_solid_fill = is_solid_fill_rgba(&rgba, width as usize, height as usize);
+            // A solid-fill page has no structure to find; skip the scan (this is
+            // also the extract binary's cheap blank-page short-circuit).
+            let rects = if detect_rects && !is_solid_fill {
+                find_solid_rects_rgba(
+                    &rgba,
+                    width as usize,
+                    height as usize,
+                    page.width(),
+                    page.height(),
+                )
+            } else {
+                Vec::new()
+            };
+
+            let png_bytes = encode_png(&rgba, width, height)?;
+
+            Ok(RenderedPage {
+                page_num,
+                width,
+                height,
+                png_bytes,
+                is_solid_fill,
+                rects,
+            })
+        })();
+
+        match page_render {
+            Ok(rendered) => results.push(rendered),
+            // The page's text is already extracted; a tolerant parse keeps
+            // it and just forgoes this page's screenshot.
+            Err(error) if continue_on_page_error => eprintln!(
+                "[render] page {page_num} failed: {error} — skipping its screenshot (continue_on_page_error)"
+            ),
+            Err(error) => return Err(error),
         }
-
-        let page = document.page((page_num - 1) as i32)?;
-        let bitmap = page.render_with_form(dpi, form.as_ref())?;
-        let width = bitmap.width() as u32;
-        let height = bitmap.height() as u32;
-        let rgba = bitmap.to_rgba();
-
-        let is_solid_fill = is_solid_fill_rgba(&rgba, width as usize, height as usize);
-        // A solid-fill page has no structure to find; skip the scan (this is
-        // also the extract binary's cheap blank-page short-circuit).
-        let rects = if detect_rects && !is_solid_fill {
-            find_solid_rects_rgba(
-                &rgba,
-                width as usize,
-                height as usize,
-                page.width(),
-                page.height(),
-            )
-        } else {
-            Vec::new()
-        };
-
-        let png_bytes = encode_png(&rgba, width, height)?;
-
-        results.push(RenderedPage {
-            page_num,
-            width,
-            height,
-            png_bytes,
-            is_solid_fill,
-            rects,
-        });
     }
 
     Ok(results)

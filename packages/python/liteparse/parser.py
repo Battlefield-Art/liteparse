@@ -343,6 +343,27 @@ def _convert_native_result(native_result: Any) -> ParseResult:
         text=native_result.text,
         total_pages=getattr(native_result, "total_pages", len(pages)),
         images=images,
+        screenshots=[
+            ScreenshotResult(
+                page_num=screenshot.page_num,
+                width=screenshot.width,
+                height=screenshot.height,
+                image_bytes=screenshot.image_bytes,
+                is_solid_fill=getattr(screenshot, "is_solid_fill", False),
+                rects=[
+                    ScreenshotRect(
+                        x=rect.x,
+                        y=rect.y,
+                        width=rect.width,
+                        height=rect.height,
+                        color=rect.color,
+                        is_line=rect.is_line,
+                    )
+                    for rect in getattr(screenshot, "rects", [])
+                ],
+            )
+            for screenshot in getattr(native_result, "screenshots", [])
+        ],
         image_error_count=getattr(native_result, "image_error_count", 0),
         page_errors=[
             PageError(page_num=error.page_num, message=error.message)
@@ -391,6 +412,7 @@ class LiteParse:
         tessdata_path: Optional[str] = None,
         max_pages: Optional[int] = None,
         target_pages: Optional[str] = None,
+        extract_screenshots: Optional[bool] = None,
         continue_on_page_error: Optional[bool] = None,
         dpi: Optional[float] = None,
         output_format: Optional[str] = None,
@@ -432,6 +454,8 @@ class LiteParse:
             tessdata_path: Path to tessdata directory for Tesseract
             max_pages: Maximum number of pages to parse
             target_pages: Specific pages to parse (e.g., "1-5,10,15-20")
+            extract_screenshots: Render parsed pages to PNG and return them in
+                ``ParseResult.screenshots``. Default False; PNG payloads can be large.
             continue_on_page_error: Skip page-level PDF extraction failures and
                 return them in ``ParseResult.page_errors``. Document-level
                 failures remain fatal. Default False.
@@ -508,6 +532,8 @@ class LiteParse:
             kwargs["max_pages"] = max_pages
         if target_pages is not None:
             kwargs["target_pages"] = target_pages
+        if extract_screenshots is not None:
+            kwargs["extract_screenshots"] = extract_screenshots
         if continue_on_page_error is not None:
             kwargs["continue_on_page_error"] = continue_on_page_error
         if dpi is not None:
@@ -774,6 +800,7 @@ class LiteParse:
             tessdata_path=cfg.tessdata_path,
             max_pages=cfg.max_pages,
             target_pages=cfg.target_pages,
+            extract_screenshots=cfg.extract_screenshots,
             continue_on_page_error=cfg.continue_on_page_error,
             dpi=cfg.dpi,
             output_format=cfg.output_format,

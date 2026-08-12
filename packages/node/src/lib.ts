@@ -9,6 +9,7 @@ import {
   type NativeExtractedImage,
   type NativeStructureTreeElement,
   type NativePageComplexityStats,
+  type NativeScreenshotResult,
 } from "./native.js";
 
 // ---------------------------------------------------------------------------
@@ -28,6 +29,8 @@ export interface LiteParseConfig {
   tessdataPath?: string;
   maxPages: number;
   targetPages?: string;
+  /** Render parsed pages to PNG and return them in `ParseResult.screenshots`. */
+  extractScreenshots: boolean;
   /** Continue after page-level extraction failures and collect `pageErrors`. */
   continueOnPageError: boolean;
   dpi: number;
@@ -357,6 +360,8 @@ export interface ParseResult {
   text: string;
   /** Populated only when `extractImages` is true. */
   images: ExtractedImage[];
+  /** PNG screenshots of parsed pages when `extractScreenshots` is enabled. */
+  screenshots: ScreenshotResult[];
   /** Embedded image objects that PDFium could not render or encode. */
   imageErrorCount: number;
   /** PDFium form type, present only when `extractFormFields` is enabled. */
@@ -552,6 +557,7 @@ export class LiteParse {
       tessdataPath: userConfig.tessdataPath,
       maxPages: userConfig.maxPages,
       targetPages: userConfig.targetPages,
+      extractScreenshots: userConfig.extractScreenshots,
       continueOnPageError: userConfig.continueOnPageError,
       dpi: userConfig.dpi,
       outputFormat: userConfig.outputFormat,
@@ -594,6 +600,7 @@ export class LiteParse {
       tessdataPath: resolved.tessdataPath ?? undefined,
       maxPages: resolved.maxPages ?? 1000,
       targetPages: resolved.targetPages ?? undefined,
+      extractScreenshots: resolved.extractScreenshots ?? false,
       continueOnPageError: resolved.continueOnPageError ?? false,
       dpi: resolved.dpi ?? 150,
       outputFormat: (resolved.outputFormat as OutputFormat) ?? "json",
@@ -778,6 +785,7 @@ function toParseResult(result: NativeParseResult): ParseResult {
     pageErrors: result.pageErrors ?? [],
     text: result.text,
     images: (result.images ?? []).map(toImage),
+    screenshots: (result.screenshots ?? []).map(toScreenshot),
     imageErrorCount: result.imageErrorCount ?? 0,
     formType: result.formType,
     creator: result.creator,
@@ -863,6 +871,17 @@ function toImage(img: NativeExtractedImage): ExtractedImage {
     format: img.format,
     duplicateOf: img.duplicateOf,
     bytes: img.bytes,
+  };
+}
+
+function toScreenshot(result: NativeScreenshotResult): ScreenshotResult {
+  return {
+    pageNum: result.pageNum,
+    width: result.width,
+    height: result.height,
+    imageBuffer: result.imageBuffer,
+    isSolidFill: result.isSolidFill,
+    rects: result.rects,
   };
 }
 

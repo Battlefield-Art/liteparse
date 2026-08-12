@@ -55,6 +55,7 @@ parser = LiteParse(
     tessdata_path=None,            # Path to tessdata directory (optional)
     max_pages=1000,                # Max pages to parse
     target_pages="1-5,10",         # Specific pages (optional)
+    extract_screenshots=False,      # Return parsed pages as PNG bytes
     continue_on_page_error=False,   # Skip broken pages and return page_errors
     dpi=150,                       # Rendering DPI
     output_format="json",          # "json" | "text" | "markdown"

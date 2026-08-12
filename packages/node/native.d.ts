@@ -22,6 +22,11 @@ export interface JsLiteParseConfig {
   /** Specific pages to parse (e.g., "1-5,10,15-20"). */
   targetPages?: string
   /**
+   * Render parsed pages to PNG and return them in `ParseResult.screenshots`.
+   * Default false; PNG payloads can be large.
+   */
+  extractScreenshots?: boolean
+  /**
    * Continue after page-level extraction failures and return them in
    * `ParseResult.pageErrors`. Default false.
    */
@@ -336,6 +341,7 @@ export interface JsParseResult {
   pageErrors: Array<JsPageError>
   text: string
   images: Array<JsExtractedImage>
+  screenshots: Array<JsScreenshotResult>
   imageErrorCount: number
   formType?: number
   /** The document's `/Info` `Creator` entry, when present. */
