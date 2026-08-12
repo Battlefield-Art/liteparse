@@ -52,6 +52,12 @@ pub struct LiteParseConfig {
     /// Skip page-level PDF extraction failures and report them in
     /// `ParseResult.pageErrors`. Document-level failures remain fatal.
     continue_on_page_error: Option<bool>,
+    /// Render parsed pages to PNG and return them in
+    /// `ParseResult.screenshots`. Default false; PNG payloads can be large.
+    extract_screenshots: Option<bool>,
+    /// Scan rendered screenshots for solid rectangles/lines and attach
+    /// them to each screenshot result. Default false.
+    detect_screenshot_rects: Option<bool>,
     dpi: Option<f32>,
     #[tsify(type = "\"json\" | \"text\" | \"markdown\" | \"md\"")]
     output_format: Option<String>,
@@ -140,6 +146,12 @@ impl LiteParseConfig {
         }
         if let Some(v) = self.continue_on_page_error {
             cfg.continue_on_page_error = v;
+        }
+        if let Some(v) = self.extract_screenshots {
+            cfg.extract_screenshots = v;
+        }
+        if let Some(v) = self.detect_screenshot_rects {
+            cfg.detect_screenshot_rects = v;
         }
         if let Some(v) = self.dpi {
             cfg.dpi = v;
@@ -250,6 +262,8 @@ impl LiteParseConfig {
             max_pages: Some(cfg.max_pages),
             target_pages: cfg.target_pages.clone(),
             continue_on_page_error: Some(cfg.continue_on_page_error),
+            extract_screenshots: Some(cfg.extract_screenshots),
+            detect_screenshot_rects: Some(cfg.detect_screenshot_rects),
             dpi: Some(cfg.dpi),
             output_format: Some(match cfg.output_format {
                 OutputFormat::Json => "json".into(),
@@ -626,6 +640,9 @@ pub struct ParseResult {
     pub pages: Vec<ParsedPage>,
     pub text: String,
     pub images: Vec<ExtractedImage>,
+    /// Page screenshots encoded as PNG. Empty unless `extractScreenshots`
+    /// is enabled.
+    pub screenshots: Vec<ScreenshotResult>,
     pub image_error_count: u32,
     pub page_errors: Vec<PageError>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -651,6 +668,38 @@ pub struct ParseResult {
 pub struct PageError {
     pub page_num: u32,
     pub message: String,
+}
+
+/// One page rendered to PNG, plus raster-derived signals.
+#[derive(Serialize, Tsify)]
+#[tsify(into_wasm_abi)]
+#[serde(rename_all = "camelCase")]
+pub struct ScreenshotResult {
+    pub page_num: u32,
+    pub width: u32,
+    pub height: u32,
+    /// PNG-encoded image bytes.
+    pub image_bytes: Vec<u8>,
+    /// True when every pixel has the same color (blank page after render).
+    pub is_solid_fill: bool,
+    /// Solid rectangles/lines detected in the raster (viewport coords).
+    /// Empty unless `detectScreenshotRects` is enabled.
+    pub rects: Vec<ScreenshotRect>,
+}
+
+/// A solid rectangle or line detected in a rendered page.
+#[derive(Serialize, Tsify)]
+#[tsify(into_wasm_abi)]
+#[serde(rename_all = "camelCase")]
+pub struct ScreenshotRect {
+    pub x: f32,
+    pub y: f32,
+    pub width: f32,
+    pub height: f32,
+    /// Fill color as ARGB hex string (e.g. "ff1a2b3c").
+    pub color: String,
+    /// True when the rect is thin enough to be a rule/divider line.
+    pub is_line: bool,
 }
 
 #[derive(Serialize, Tsify)]
@@ -1076,11 +1125,36 @@ fn to_js_result(result: &liteparse::ParseResult, extract_text_metadata: bool) ->
         })
         .collect();
 
+    let screenshots: Vec<ScreenshotResult> = result
+        .screenshots
+        .iter()
+        .map(|shot| ScreenshotResult {
+            page_num: shot.page_num,
+            width: shot.width,
+            height: shot.height,
+            image_bytes: shot.image_bytes.clone(),
+            is_solid_fill: shot.is_solid_fill,
+            rects: shot
+                .rects
+                .iter()
+                .map(|rect| ScreenshotRect {
+                    x: rect.x,
+                    y: rect.y,
+                    width: rect.width,
+                    height: rect.height,
+                    color: rect.color.clone(),
+                    is_line: rect.is_line,
+                })
+                .collect(),
+        })
+        .collect();
+
     ParseResult {
         total_pages: result.total_pages,
         pages,
         text: result.text.clone(),
         images,
+        screenshots,
         image_error_count: result.image_error_count,
         page_errors: result
             .page_errors

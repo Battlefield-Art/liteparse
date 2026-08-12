@@ -11,7 +11,6 @@ use crate::ocr::tesseract::TesseractOcrEngine;
 use crate::ocr_merge;
 use crate::output::markdown;
 use crate::projection;
-#[cfg(not(target_arch = "wasm32"))]
 use crate::render;
 use crate::types::{
     DocumentMetadata, ExtractedImage, OutlineTarget, Page, PageError, ParsedPage, PdfInput,
@@ -695,7 +694,6 @@ impl LiteParse {
             } else {
                 Vec::new()
             };
-            #[cfg(not(target_arch = "wasm32"))]
             let screenshots = if self.config.extract_screenshots {
                 let page_numbers = pages
                     .iter()
@@ -722,8 +720,6 @@ impl LiteParse {
             } else {
                 Vec::new()
             };
-            #[cfg(target_arch = "wasm32")]
-            let screenshots = Vec::new();
             // `lib` is dropped here, releasing the PDFium lock.
             (
                 pages,

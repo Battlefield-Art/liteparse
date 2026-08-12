@@ -883,9 +883,8 @@ fn render_page_images(
     }
 }
 
-/// Encode RGBA pixel bytes to PNG. Lives here (always-compiled) rather than in
-/// `render` so the image-embed path is available on wasm, where the `render`
-/// module (page rasterization / screenshots) is compiled out.
+/// Encode RGBA pixel bytes to PNG. Used by both the image-embed path and the
+/// `render` module (page rasterization / screenshots).
 pub(crate) fn encode_png(rgba: &[u8], width: u32, height: u32) -> Result<Vec<u8>, LiteParseError> {
     let mut png_buf = Vec::new();
     let encoder = image::codecs::png::PngEncoder::new(&mut png_buf);
