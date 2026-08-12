@@ -28,6 +28,8 @@ export interface LiteParseConfig {
   tessdataPath?: string;
   maxPages: number;
   targetPages?: string;
+  /** Continue after page-level extraction failures and collect `pageErrors`. */
+  continueOnPageError: boolean;
   dpi: number;
   outputFormat: OutputFormat;
   /** How to surface raster images in markdown output (default: "placeholder"). */
@@ -350,6 +352,8 @@ export interface ParseResult {
   /** Total source-document pages before `targetPages` or `maxPages` filtering. */
   totalPages: number;
   pages: ParsedPage[];
+  /** Page-level PDFium extraction failures when tolerance is enabled. */
+  pageErrors: Array<{ pageNum: number; message: string }>;
   text: string;
   /** Populated only when `extractImages` is true. */
   images: ExtractedImage[];
@@ -548,6 +552,7 @@ export class LiteParse {
       tessdataPath: userConfig.tessdataPath,
       maxPages: userConfig.maxPages,
       targetPages: userConfig.targetPages,
+      continueOnPageError: userConfig.continueOnPageError,
       dpi: userConfig.dpi,
       outputFormat: userConfig.outputFormat,
       imageMode: userConfig.imageMode,
@@ -589,6 +594,7 @@ export class LiteParse {
       tessdataPath: resolved.tessdataPath ?? undefined,
       maxPages: resolved.maxPages ?? 1000,
       targetPages: resolved.targetPages ?? undefined,
+      continueOnPageError: resolved.continueOnPageError ?? false,
       dpi: resolved.dpi ?? 150,
       outputFormat: (resolved.outputFormat as OutputFormat) ?? "json",
       imageMode: (resolved.imageMode as ImageMode) ?? "placeholder",
@@ -694,14 +700,7 @@ export class LiteParse {
       graphics: p.graphics,
     }));
     const result = this._native.parsePages(nativePages);
-    return {
-      totalPages: result.totalPages,
-      pages: result.pages.map(toPage),
-      text: result.text,
-      images: (result.images ?? []).map(toImage),
-      imageErrorCount: result.imageErrorCount ?? 0,
-      docMeta: result.docMeta,
-    };
+    return toParseResult(result);
   }
 
   /**
@@ -776,6 +775,7 @@ function toParseResult(result: NativeParseResult): ParseResult {
   return {
     totalPages: result.totalPages,
     pages: result.pages.map(toPage),
+    pageErrors: result.pageErrors ?? [],
     text: result.text,
     images: (result.images ?? []).map(toImage),
     imageErrorCount: result.imageErrorCount ?? 0,

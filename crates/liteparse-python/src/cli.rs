@@ -51,6 +51,9 @@ struct ParseCommand {
     max_pages: usize,
     #[arg(long)]
     target_pages: Option<String>,
+    /// Continue after page-level extraction errors and report them in JSON.
+    #[arg(long)]
+    continue_on_page_error: bool,
     #[arg(long, default_value = "150")]
     dpi: f32,
     #[arg(long)]
@@ -269,6 +272,7 @@ pub fn run_cli(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
                 tessdata_path: cmd.tessdata_path,
                 max_pages: cmd.max_pages,
                 target_pages: cmd.target_pages,
+                continue_on_page_error: cmd.continue_on_page_error,
                 dpi: cmd.dpi,
                 output_format: format,
                 preserve_very_small_text: cmd.preserve_small_text,
@@ -300,6 +304,14 @@ pub fn run_cli(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
             } else {
                 rt.block_on(lp.parse(&cmd.file))?
             };
+            // JSON output carries `page_errors` itself; text/markdown would
+            // silently omit the failed pages, so always surface them on stderr.
+            for error in &result.page_errors {
+                eprintln!(
+                    "[liteparse] page {} failed to extract and was skipped: {}",
+                    error.page_number, error.message
+                );
+            }
             let formatted = match lp.config().output_format {
                 OutputFormat::Json => {
                     json::format_json_result(&result, lp.config().extract_text_metadata)?

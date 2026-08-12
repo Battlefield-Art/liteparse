@@ -20,6 +20,7 @@ from .types import (
     ParsedPage,
     ParseBatch,
     ParseError,
+    PageError,
     ParseResult,
     DocumentMetadata,
     ScreenshotRect,
@@ -343,6 +344,10 @@ def _convert_native_result(native_result: Any) -> ParseResult:
         total_pages=getattr(native_result, "total_pages", len(pages)),
         images=images,
         image_error_count=getattr(native_result, "image_error_count", 0),
+        page_errors=[
+            PageError(page_num=error.page_num, message=error.message)
+            for error in getattr(native_result, "page_errors", [])
+        ],
         form_type=getattr(native_result, "form_type", None),
         creator=getattr(native_result, "creator", None),
         producer=getattr(native_result, "producer", None),
@@ -386,6 +391,7 @@ class LiteParse:
         tessdata_path: Optional[str] = None,
         max_pages: Optional[int] = None,
         target_pages: Optional[str] = None,
+        continue_on_page_error: Optional[bool] = None,
         dpi: Optional[float] = None,
         output_format: Optional[str] = None,
         preserve_very_small_text: Optional[bool] = None,
@@ -426,6 +432,9 @@ class LiteParse:
             tessdata_path: Path to tessdata directory for Tesseract
             max_pages: Maximum number of pages to parse
             target_pages: Specific pages to parse (e.g., "1-5,10,15-20")
+            continue_on_page_error: Skip page-level PDF extraction failures and
+                return them in ``ParseResult.page_errors``. Document-level
+                failures remain fatal. Default False.
             dpi: DPI for rendering (affects OCR quality)
             output_format: Output format: "json", "text", or "markdown" (default: "json")
             preserve_very_small_text: Whether to preserve very small text
@@ -499,6 +508,8 @@ class LiteParse:
             kwargs["max_pages"] = max_pages
         if target_pages is not None:
             kwargs["target_pages"] = target_pages
+        if continue_on_page_error is not None:
+            kwargs["continue_on_page_error"] = continue_on_page_error
         if dpi is not None:
             kwargs["dpi"] = dpi
         if output_format is not None:
@@ -763,6 +774,7 @@ class LiteParse:
             tessdata_path=cfg.tessdata_path,
             max_pages=cfg.max_pages,
             target_pages=cfg.target_pages,
+            continue_on_page_error=cfg.continue_on_page_error,
             dpi=cfg.dpi,
             output_format=cfg.output_format,
             preserve_very_small_text=cfg.preserve_very_small_text,

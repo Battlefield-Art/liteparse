@@ -14,8 +14,8 @@ use crate::projection;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::render;
 use crate::types::{
-    DocumentMetadata, ExtractedImage, OutlineTarget, Page, ParsedPage, PdfInput, ScreenshotRect,
-    XfaPacket,
+    DocumentMetadata, ExtractedImage, OutlineTarget, Page, PageError, ParsedPage, PdfInput,
+    ScreenshotRect, XfaPacket,
 };
 use pdfium::Library;
 
@@ -26,6 +26,9 @@ pub struct ParseResult {
     pub total_pages: u32,
     /// Parsed pages with projected text layout.
     pub pages: Vec<ParsedPage>,
+    /// Page-level PDFium extraction failures collected when
+    /// `continue_on_page_error` is enabled.
+    pub page_errors: Vec<PageError>,
     /// Full document text, concatenated from all pages.
     pub text: String,
     /// Document outline (bookmarks) when present. Used by the markdown
@@ -326,7 +329,10 @@ impl LiteParse {
                 self.config.max_pages,
                 false, // extract_links: irrelevant for complexity stats
                 self.glyph_resolver.as_deref(),
-                extract::ExtractionOutputOptions::default(),
+                extract::ExtractionOutputOptions {
+                    continue_on_page_error: self.config.continue_on_page_error,
+                    ..Default::default()
+                },
             )?
             .pages;
             let t_extract = web_time::Instant::now();
@@ -336,13 +342,29 @@ impl LiteParse {
                 pages.len()
             ));
 
-            let page_complexities = pages
-                .iter()
-                .map(|page| {
-                    let page_obj = document.page((page.page_number - 1) as i32)?;
-                    ocr_merge::calculate_page_complexity(page, &page_obj)
-                })
-                .collect::<Result<Vec<_>, _>>()?;
+            // In tolerant mode a page whose stats fail is dropped from both
+            // vectors (consumers match stats to pages by `page_number`), so
+            // the layout zip below stays aligned.
+            let mut kept_pages = Vec::with_capacity(pages.len());
+            let mut page_complexities = Vec::with_capacity(pages.len());
+            for page in pages {
+                let stats = document
+                    .page((page.page_number - 1) as i32)
+                    .map_err(LiteParseError::from)
+                    .and_then(|page_obj| ocr_merge::calculate_page_complexity(&page, &page_obj));
+                match stats {
+                    Ok(stats) => {
+                        page_complexities.push(stats);
+                        kept_pages.push(page);
+                    }
+                    Err(error) if self.config.continue_on_page_error => log(&format!(
+                        "[liteparse] complexity failed on page {}: {}",
+                        page.page_number, error
+                    )),
+                    Err(error) => return Err(error),
+                }
+            }
+            let pages = kept_pages;
             log(&format!(
                 "[liteparse] complexity: {:.1}ms",
                 web_time::Instant::now()
@@ -507,6 +529,7 @@ impl LiteParse {
         #[allow(unused_mut)] // mutated only by the native image-output writer
         let (
             pages,
+            page_errors,
             total_pages,
             ocr_rendered,
             outline,
@@ -578,6 +601,7 @@ impl LiteParse {
                     && self.config.output_format == crate::config::OutputFormat::Markdown,
                 self.glyph_resolver.as_deref(),
                 extract::ExtractionOutputOptions {
+                    continue_on_page_error: self.config.continue_on_page_error,
                     extract_content_bounds: self.config.extract_content_bounds,
                     extract_images: self.config.effective_extract_images(),
                     // The markdown table detector splits PDFium's merged
@@ -594,6 +618,7 @@ impl LiteParse {
             )?;
             let extract::ExtractedPages {
                 pages,
+                page_errors,
                 images,
                 image_error_count,
                 flattened_form_widgets,
@@ -627,6 +652,7 @@ impl LiteParse {
                     self.config.dpi,
                     ocr_grayscale,
                     self.config.render_form_fields,
+                    self.config.continue_on_page_error,
                 )?;
                 log(&format!(
                     "[liteparse] ocr render: {:.1}ms ({} pages)",
@@ -642,19 +668,32 @@ impl LiteParse {
             };
 
             let complexity = if self.config.include_complexity {
-                pages
-                    .iter()
-                    .map(|page| {
-                        let page_obj = analysis_document.page((page.page_number - 1) as i32)?;
-                        ocr_merge::calculate_page_complexity(page, &page_obj)
-                    })
-                    .collect::<Result<Vec<_>, _>>()?
+                let mut complexity = Vec::with_capacity(pages.len());
+                for page in &pages {
+                    let stats = analysis_document
+                        .page((page.page_number - 1) as i32)
+                        .map_err(LiteParseError::from)
+                        .and_then(|page_obj| ocr_merge::calculate_page_complexity(page, &page_obj));
+                    match stats {
+                        Ok(stats) => complexity.push(stats),
+                        // The page's text is already extracted; a tolerant
+                        // parse keeps it and just leaves `complexity` unset
+                        // (stats attach by page number below).
+                        Err(error) if self.config.continue_on_page_error => log(&format!(
+                            "[liteparse] complexity failed on page {}: {}",
+                            page.page_number, error
+                        )),
+                        Err(error) => return Err(error),
+                    }
+                }
+                complexity
             } else {
                 Vec::new()
             };
             // `lib` is dropped here, releasing the PDFium lock.
             (
                 pages,
+                page_errors,
                 total_pages,
                 rendered,
                 outline,
@@ -703,7 +742,14 @@ impl LiteParse {
 
         // Attach per-page complexity signals, including the layout signals
         // that need the projected page (same as `is_complex()` reports).
-        for (page, mut stats) in parsed_pages.iter_mut().zip(complexity) {
+        // Matched by page number, not position: a tolerant parse may have no
+        // stats for a page whose complexity pass failed.
+        let mut complexity = complexity.into_iter().peekable();
+        for page in parsed_pages.iter_mut() {
+            let Some(mut stats) = complexity.next_if(|stats| stats.page_number == page.page_number)
+            else {
+                continue;
+            };
             stats.layout = Some(ocr_merge::calculate_layout_complexity(page));
             page.complexity = Some(stats);
         }
@@ -754,6 +800,7 @@ impl LiteParse {
         Ok(ParseResult {
             total_pages,
             pages: parsed_pages,
+            page_errors,
             text: full_text,
             outline,
             images,
@@ -801,6 +848,7 @@ impl LiteParse {
         ParseResult {
             total_pages,
             pages: parsed_pages,
+            page_errors: Vec::new(),
             text: full_text,
             outline,
             images: Vec::new(),

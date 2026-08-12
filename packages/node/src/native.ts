@@ -27,6 +27,7 @@ export interface LiteParseNativeConfig {
   tessdataPath?: string;
   maxPages?: number;
   targetPages?: string;
+  continueOnPageError?: boolean;
   dpi?: number;
   outputFormat?: string;
   imageMode?: string;
@@ -236,6 +237,7 @@ export interface NativeExtractedImage {
 export interface NativeParseResult {
   totalPages: number;
   pages: NativeParsedPage[];
+  pageErrors: Array<{ pageNum: number; message: string }>;
   text: string;
   images: NativeExtractedImage[];
   imageErrorCount: number;

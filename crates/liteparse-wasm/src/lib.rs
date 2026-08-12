@@ -49,6 +49,9 @@ pub struct LiteParseConfig {
     tessdata_path: Option<String>,
     max_pages: Option<usize>,
     target_pages: Option<String>,
+    /// Skip page-level PDF extraction failures and report them in
+    /// `ParseResult.pageErrors`. Document-level failures remain fatal.
+    continue_on_page_error: Option<bool>,
     dpi: Option<f32>,
     #[tsify(type = "\"json\" | \"text\" | \"markdown\" | \"md\"")]
     output_format: Option<String>,
@@ -134,6 +137,9 @@ impl LiteParseConfig {
         }
         if self.target_pages.is_some() {
             cfg.target_pages = self.target_pages;
+        }
+        if let Some(v) = self.continue_on_page_error {
+            cfg.continue_on_page_error = v;
         }
         if let Some(v) = self.dpi {
             cfg.dpi = v;
@@ -243,6 +249,7 @@ impl LiteParseConfig {
             tessdata_path: cfg.tessdata_path.clone(),
             max_pages: Some(cfg.max_pages),
             target_pages: cfg.target_pages.clone(),
+            continue_on_page_error: Some(cfg.continue_on_page_error),
             dpi: Some(cfg.dpi),
             output_format: Some(match cfg.output_format {
                 OutputFormat::Json => "json".into(),
@@ -620,6 +627,7 @@ pub struct ParseResult {
     pub text: String,
     pub images: Vec<ExtractedImage>,
     pub image_error_count: u32,
+    pub page_errors: Vec<PageError>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub form_type: Option<i32>,
     /// The document's `/Info` `Creator` entry, when present.
@@ -635,6 +643,14 @@ pub struct ParseResult {
     /// Raw XFA packets; present only when `extractXfaPackets` is enabled.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub xfa_packets: Option<Vec<XfaPacket>>,
+}
+
+#[derive(Serialize, Tsify)]
+#[tsify(into_wasm_abi)]
+#[serde(rename_all = "camelCase")]
+pub struct PageError {
+    pub page_num: u32,
+    pub message: String,
 }
 
 #[derive(Serialize, Tsify)]
@@ -1066,6 +1082,14 @@ fn to_js_result(result: &liteparse::ParseResult, extract_text_metadata: bool) ->
         text: result.text.clone(),
         images,
         image_error_count: result.image_error_count,
+        page_errors: result
+            .page_errors
+            .iter()
+            .map(|error| PageError {
+                page_num: error.page_number,
+                message: error.message.clone(),
+            })
+            .collect(),
         form_type: result.form_type,
         creator: result.creator.clone(),
         producer: result.producer.clone(),

@@ -21,6 +21,11 @@ export interface JsLiteParseConfig {
   maxPages?: number
   /** Specific pages to parse (e.g., "1-5,10,15-20"). */
   targetPages?: string
+  /**
+   * Continue after page-level extraction failures and return them in
+   * `ParseResult.pageErrors`. Default false.
+   */
+  continueOnPageError?: boolean
   /** DPI for rendering pages (used for OCR and screenshots). */
   dpi?: number
   /** Output format: "json", "text", or "markdown". */
@@ -328,6 +333,7 @@ export interface JsParseResult {
   /** Total source-document pages before target/max-page filtering. */
   totalPages: number
   pages: Array<JsParsedPage>
+  pageErrors: Array<JsPageError>
   text: string
   images: Array<JsExtractedImage>
   imageErrorCount: number
@@ -343,6 +349,10 @@ export interface JsParseResult {
   docMeta?: JsDocumentMetadata
   /** Raw XFA packets; present only when `extractXfaPackets` is enabled. */
   xfaPackets?: Array<JsXfaPacket>
+}
+export interface JsPageError {
+  pageNum: number
+  message: string
 }
 /** One batch of pages from a `ParseSession`. */
 export interface JsParseBatch {

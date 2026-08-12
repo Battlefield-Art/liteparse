@@ -439,6 +439,7 @@ pub(crate) fn render_pages_for_ocr(
     dpi: f32,
     grayscale: bool,
     render_form_fields: bool,
+    continue_on_page_error: bool,
 ) -> Result<Vec<RenderedPage>, LiteParseError> {
     let mut rendered = Vec::new();
     // With `render_form_fields`, draw form-field appearances into the OCR
@@ -452,40 +453,53 @@ pub(crate) fn render_pages_for_ocr(
         form.run_document_actions();
     }
     for (idx, page) in pages.iter().enumerate() {
-        let page_obj = document.page((page.page_number - 1) as i32)?;
-        let page_complexity = calculate_page_complexity(page, &page_obj)?;
+        let page_render = (|| -> Result<Option<RenderedPage>, LiteParseError> {
+            let page_obj = document.page((page.page_number - 1) as i32)?;
+            let page_complexity = calculate_page_complexity(page, &page_obj)?;
 
-        if !page_complexity.needs_ocr {
-            continue;
-        }
-
-        // Clamp the render DPI so the long edge stays within the raster budget.
-        let long_edge_pt = page.page_width.max(page.page_height);
-        let mut eff_dpi = dpi;
-        if long_edge_pt > 0.0 {
-            let max_dpi = MAX_OCR_RENDER_LONG_EDGE_PX * 72.0 / long_edge_pt;
-            if eff_dpi > max_dpi {
-                eff_dpi = max_dpi;
+            if !page_complexity.needs_ocr {
+                return Ok(None);
             }
+
+            // Clamp the render DPI so the long edge stays within the raster budget.
+            let long_edge_pt = page.page_width.max(page.page_height);
+            let mut eff_dpi = dpi;
+            if long_edge_pt > 0.0 {
+                let max_dpi = MAX_OCR_RENDER_LONG_EDGE_PX * 72.0 / long_edge_pt;
+                if eff_dpi > max_dpi {
+                    eff_dpi = max_dpi;
+                }
+            }
+
+            let bitmap = page_obj.render_with_form(eff_dpi, form.as_ref())?;
+            let width = bitmap.width() as u32;
+            let height = bitmap.height() as u32;
+            // Grayscale or RGB per the engine; see `OcrEngine::prefers_grayscale`.
+            let pixels = if grayscale {
+                bitmap.to_luma()
+            } else {
+                bitmap.to_rgb()
+            };
+
+            Ok(Some(RenderedPage {
+                idx,
+                pixels,
+                width,
+                height,
+                dpi: eff_dpi,
+            }))
+        })();
+        match page_render {
+            Ok(Some(render)) => rendered.push(render),
+            Ok(None) => {}
+            // The page already extracted successfully, so a tolerant parse
+            // keeps its native text and only forgoes the OCR enrichment.
+            Err(error) if continue_on_page_error => eprintln!(
+                "[ocr] render failed for page {}: {} — keeping native text without OCR (continue_on_page_error)",
+                page.page_number, error
+            ),
+            Err(error) => return Err(error),
         }
-
-        let bitmap = page_obj.render_with_form(eff_dpi, form.as_ref())?;
-        let width = bitmap.width() as u32;
-        let height = bitmap.height() as u32;
-        // Grayscale or RGB per the engine; see `OcrEngine::prefers_grayscale`.
-        let pixels = if grayscale {
-            bitmap.to_luma()
-        } else {
-            bitmap.to_rgb()
-        };
-
-        rendered.push(RenderedPage {
-            idx,
-            pixels,
-            width,
-            height,
-            dpi: eff_dpi,
-        });
     }
     Ok(rendered)
 }

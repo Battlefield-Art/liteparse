@@ -244,6 +244,13 @@ class DocumentMetadata:
 
 
 @dataclass
+class PageError:
+    """A page-level extraction failure skipped during a tolerant parse."""
+    page_num: int
+    message: str
+
+
+@dataclass
 class ParseResult:
     """Result of parsing a document."""
     pages: List[ParsedPage]
@@ -252,6 +259,7 @@ class ParseResult:
     total_pages: int = 0
     images: List[ExtractedImage] = field(default_factory=list)
     image_error_count: int = 0
+    page_errors: List[PageError] = field(default_factory=list)
     #: PDFium form type, present only when ``extract_form_fields=True``.
     form_type: Optional[int] = None
     #: The document's ``/Info`` ``Creator`` entry, when present.
@@ -397,6 +405,7 @@ class LiteParseConfig:
     tessdata_path: Optional[str]
     max_pages: int
     target_pages: Optional[str]
+    continue_on_page_error: bool
     dpi: float
     output_format: str
     preserve_very_small_text: bool
