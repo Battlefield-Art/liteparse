@@ -597,6 +597,8 @@ impl PyParsedPage {
 #[derive(Clone)]
 struct PyParseResult {
     #[pyo3(get)]
+    total_pages: u32,
+    #[pyo3(get)]
     pages: Vec<PyParsedPage>,
     #[pyo3(get)]
     text: String,
@@ -607,6 +609,8 @@ struct PyParseResult {
     #[pyo3(get)]
     image_error_count: u32,
     #[pyo3(get)]
+    page_errors: Vec<PyPageError>,
+    #[pyo3(get)]
     form_type: Option<i32>,
     #[pyo3(get)]
     creator: Option<String>,
@@ -616,6 +620,15 @@ struct PyParseResult {
     doc_meta: Option<PyDocumentMetadata>,
     #[pyo3(get)]
     xfa_packets: Option<Vec<PyXfaPacket>>,
+}
+
+#[pyclass(frozen, from_py_object)]
+#[derive(Clone)]
+struct PyPageError {
+    #[pyo3(get)]
+    page_num: u32,
+    #[pyo3(get)]
+    message: String,
 }
 
 #[pyclass(frozen, from_py_object)]
@@ -720,6 +733,7 @@ impl PyParseResult {
 impl PyParseResult {
     fn from_rust(result: liteparse::parser::ParseResult, extract_text_metadata: bool) -> Self {
         Self {
+            total_pages: result.total_pages,
             pages: result
                 .pages
                 .into_iter()
@@ -737,6 +751,14 @@ impl PyParseResult {
                 .map(PyScreenshotResult::from_rust)
                 .collect(),
             image_error_count: result.image_error_count,
+            page_errors: result
+                .page_errors
+                .into_iter()
+                .map(|error| PyPageError {
+                    page_num: error.page_number,
+                    message: error.message,
+                })
+                .collect(),
             form_type: result.form_type,
             creator: result.creator,
             producer: result.producer,
@@ -1077,6 +1099,8 @@ struct PyLiteParseConfig {
     #[pyo3(get)]
     extract_screenshots: bool,
     #[pyo3(get)]
+    continue_on_page_error: bool,
+    #[pyo3(get)]
     dpi: f32,
     #[pyo3(get)]
     output_format: String,
@@ -1157,6 +1181,7 @@ impl PyLiteParseConfig {
             max_pages: cfg.max_pages,
             target_pages: cfg.target_pages.clone(),
             extract_screenshots: cfg.extract_screenshots,
+            continue_on_page_error: cfg.continue_on_page_error,
             dpi: cfg.dpi,
             output_format: match cfg.output_format {
                 OutputFormat::Json => "json".to_string(),
@@ -1200,6 +1225,76 @@ impl PyLiteParseConfig {
 }
 
 // ---------------------------------------------------------------------------
+// Batch parsing
+// ---------------------------------------------------------------------------
+
+/// One batch of pages from a `_ParseSession`. Internal plumbing for the
+/// wrapper's `parse_batches()`, which converts it into the public
+/// `liteparse.types.ParseBatch` dataclass — the underscore name keeps the
+/// two from colliding.
+#[pyclass(frozen, name = "_ParseBatch", skip_from_py_object)]
+#[derive(Clone)]
+struct PyParseBatch {
+    /// First source page in this batch (1-indexed).
+    #[pyo3(get)]
+    start_page: u32,
+    /// Last source page in this batch (1-indexed, inclusive).
+    #[pyo3(get)]
+    end_page: u32,
+    /// The pages in `start_page..=end_page`, as an ordinary parse result.
+    #[pyo3(get)]
+    result: PyParseResult,
+}
+
+/// A document opened once and parsed in bounded page batches. Internal
+/// plumbing for the wrapper's `parse_batches()` — prefer that.
+///
+/// Iterate it directly to consume every batch:
+///
+///     for batch in parser.open_batch_session("large.pdf", batch_size=20):
+///         handle(batch.result.pages)
+#[pyclass(name = "_ParseSession", unsendable)]
+struct PyParseSession {
+    inner: liteparse::ParseSession,
+    runtime: std::sync::Arc<tokio::runtime::Runtime>,
+    extract_text_metadata: bool,
+}
+
+#[pymethods]
+impl PyParseSession {
+    /// Total pages in the source document, before `max_pages` or batching.
+    #[getter]
+    fn total_pages(&self) -> u32 {
+        self.inner.total_pages()
+    }
+
+    /// Parse and return the next batch, or `None` once every page within
+    /// `max_pages` has been yielded.
+    fn next_batch(&mut self, py: Python<'_>) -> PyResult<Option<PyParseBatch>> {
+        // Releasing the GIL keeps other Python threads running while PDFium
+        // extraction and grid projection execute, matching `parse()`.
+        let batch = py
+            .detach(|| self.runtime.block_on(self.inner.next_batch()))
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
+
+        Ok(batch.map(|batch| PyParseBatch {
+            start_page: batch.start_page,
+            end_page: batch.end_page,
+            result: PyParseResult::from_rust(batch.result, self.extract_text_metadata),
+        }))
+    }
+
+    fn __iter__(slf: PyRef<'_, Self>) -> PyRef<'_, Self> {
+        slf
+    }
+
+    /// Returning `None` raises `StopIteration`, ending the loop.
+    fn __next__(&mut self, py: Python<'_>) -> PyResult<Option<PyParseBatch>> {
+        self.next_batch(py)
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Main LiteParse class
 // ---------------------------------------------------------------------------
 
@@ -1207,7 +1302,7 @@ impl PyLiteParseConfig {
 struct LiteParse {
     inner: liteparse::parser::LiteParse,
     config: LiteParseConfig,
-    runtime: tokio::runtime::Runtime,
+    runtime: std::sync::Arc<tokio::runtime::Runtime>,
 }
 
 #[pymethods]
@@ -1223,6 +1318,7 @@ impl LiteParse {
         max_pages = None,
         target_pages = None,
         extract_screenshots = None,
+        continue_on_page_error = None,
         dpi = None,
         output_format = None,
         preserve_very_small_text = None,
@@ -1260,6 +1356,7 @@ impl LiteParse {
         max_pages: Option<usize>,
         target_pages: Option<String>,
         extract_screenshots: Option<bool>,
+        continue_on_page_error: Option<bool>,
         dpi: Option<f32>,
         output_format: Option<String>,
         preserve_very_small_text: Option<bool>,
@@ -1312,6 +1409,9 @@ impl LiteParse {
         }
         if let Some(v) = extract_screenshots {
             cfg.extract_screenshots = v;
+        }
+        if let Some(v) = continue_on_page_error {
+            cfg.continue_on_page_error = v;
         }
         if let Some(v) = dpi {
             cfg.dpi = v;
@@ -1409,8 +1509,10 @@ impl LiteParse {
         }
 
         let inner = liteparse::parser::LiteParse::new(cfg.clone());
-        let runtime = tokio::runtime::Runtime::new()
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
+        let runtime = std::sync::Arc::new(
+            tokio::runtime::Runtime::new()
+                .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?,
+        );
 
         Ok(Self {
             inner,
@@ -1429,6 +1531,35 @@ impl LiteParse {
             result,
             self.config.extract_text_metadata,
         ))
+    }
+
+    /// Open a document from a file path for bounded-memory batch parsing.
+    /// Internal plumbing for the wrapper's `parse_batches()` — prefer that.
+    ///
+    /// Converts a non-PDF source once and returns a `_ParseSession` yielding
+    /// `batch_size` pages at a time. Cross-page passes (repeated header/footer
+    /// removal, image deduplication) see only the pages in their own batch, so
+    /// output can differ from a whole-document `parse()`.
+    #[pyo3(signature = (input, batch_size = None))]
+    fn open_batch_session(
+        &self,
+        py: Python<'_>,
+        input: String,
+        batch_size: Option<usize>,
+    ) -> PyResult<PyParseSession> {
+        self.open_session(py, PdfInput::Path(input), batch_size)
+    }
+
+    /// Open a document from raw bytes for bounded-memory batch parsing.
+    /// Internal plumbing for the wrapper's `parse_batches()` — prefer that.
+    #[pyo3(signature = (data, batch_size = None))]
+    fn open_batch_session_bytes(
+        &self,
+        py: Python<'_>,
+        data: Vec<u8>,
+        batch_size: Option<usize>,
+    ) -> PyResult<PyParseSession> {
+        self.open_session(py, PdfInput::Bytes(data), batch_size)
     }
 
     /// Parse a document from raw bytes.
@@ -1523,6 +1654,31 @@ impl LiteParse {
     }
 }
 
+impl LiteParse {
+    /// Shared body of `open_batch_session` / `open_batch_session_bytes`. Not
+    /// a `#[pymethods]` entry, so it stays off the Python surface.
+    fn open_session(
+        &self,
+        py: Python<'_>,
+        input: PdfInput,
+        batch_size: Option<usize>,
+    ) -> PyResult<PyParseSession> {
+        let batch_size = batch_size.unwrap_or(liteparse::DEFAULT_PAGE_BATCH_SIZE);
+        let session = py
+            .detach(|| {
+                self.runtime
+                    .block_on(self.inner.open_batch_session(input, batch_size))
+            })
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
+
+        Ok(PyParseSession {
+            inner: session,
+            runtime: self.runtime.clone(),
+            extract_text_metadata: self.config.extract_text_metadata,
+        })
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Module
 // ---------------------------------------------------------------------------
@@ -1595,6 +1751,9 @@ fn _liteparse(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<LiteParse>()?;
     m.add_class::<PyLiteParseConfig>()?;
     m.add_class::<PyParseResult>()?;
+    m.add_class::<PyPageError>()?;
+    m.add_class::<PyParseBatch>()?;
+    m.add_class::<PyParseSession>()?;
     m.add_class::<PyDocumentMetadata>()?;
     m.add_class::<PyExtractedImage>()?;
     m.add_class::<PyImageRect>()?;

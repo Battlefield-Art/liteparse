@@ -18,6 +18,7 @@ from liteparse import LiteParse
 parser = LiteParse()
 result = parser.parse("document.pdf")
 print(result.text)
+print(f"Source document pages: {result.total_pages}")
 
 # Access structured data
 for page in result.pages:
@@ -55,6 +56,7 @@ parser = LiteParse(
     max_pages=1000,                # Max pages to parse
     target_pages="1-5,10",         # Specific pages (optional)
     extract_screenshots=False,      # Return parsed pages as PNG bytes
+    continue_on_page_error=False,   # Skip broken pages and return page_errors
     dpi=150,                       # Rendering DPI
     output_format="json",          # "json" | "text" | "markdown"
     image_mode="placeholder",      # Markdown image handling: "placeholder" | "off" | "embed"

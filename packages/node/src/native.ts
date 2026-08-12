@@ -28,6 +28,7 @@ export interface LiteParseNativeConfig {
   maxPages?: number;
   targetPages?: string;
   extractScreenshots?: boolean;
+  continueOnPageError?: boolean;
   dpi?: number;
   outputFormat?: string;
   imageMode?: string;
@@ -235,7 +236,9 @@ export interface NativeExtractedImage {
 }
 
 export interface NativeParseResult {
+  totalPages: number;
   pages: NativeParsedPage[];
+  pageErrors: Array<{ pageNum: number; message: string }>;
   text: string;
   images: NativeExtractedImage[];
   screenshots: NativeScreenshotResult[];
@@ -317,8 +320,24 @@ export interface NativePageComplexityStats {
   layout?: NativeLayoutComplexityStats;
 }
 
+export interface NativeParseBatch {
+  startPage: number;
+  endPage: number;
+  result: NativeParseResult;
+}
+
+export interface NativeParseSession {
+  nextBatch(): Promise<NativeParseBatch | null>;
+  close(): Promise<void>;
+  readonly totalPages: number;
+}
+
 export interface LiteParseNative {
   parse(input: string | Buffer): Promise<NativeParseResult>;
+  openBatchSession(
+    input: string | Buffer,
+    batchSize?: number,
+  ): Promise<NativeParseSession>;
   parsePages(pages: NativePageInput[]): NativeParseResult;
   isComplex(input: string | Buffer): Promise<NativePageComplexityStats[]>;
   screenshot(

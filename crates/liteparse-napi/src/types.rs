@@ -35,6 +35,9 @@ pub struct JsLiteParseConfig {
     /// Render parsed pages to PNG and return them in `ParseResult.screenshots`.
     /// Default false; PNG payloads can be large.
     pub extract_screenshots: Option<bool>,
+    /// Continue after page-level extraction failures and return them in
+    /// `ParseResult.pageErrors`. Default false.
+    pub continue_on_page_error: Option<bool>,
     /// DPI for rendering pages (used for OCR and screenshots).
     pub dpi: Option<f64>,
     /// Output format: "json", "text", or "markdown".
@@ -151,6 +154,9 @@ impl JsLiteParseConfig {
         if let Some(v) = self.extract_screenshots {
             cfg.extract_screenshots = v;
         }
+        if let Some(v) = self.continue_on_page_error {
+            cfg.continue_on_page_error = v;
+        }
         if let Some(v) = self.dpi {
             cfg.dpi = v as f32;
         }
@@ -262,6 +268,7 @@ impl JsLiteParseConfig {
             max_pages: Some(cfg.max_pages as u32),
             target_pages: cfg.target_pages.clone(),
             extract_screenshots: Some(cfg.extract_screenshots),
+            continue_on_page_error: Some(cfg.continue_on_page_error),
             dpi: Some(cfg.dpi as f64),
             output_format: Some(match cfg.output_format {
                 OutputFormat::Json => "json".to_string(),
@@ -888,7 +895,10 @@ impl JsParsedPage {
 #[napi(object)]
 #[derive(Clone)]
 pub struct JsParseResult {
+    /// Total source-document pages before target/max-page filtering.
+    pub total_pages: u32,
     pub pages: Vec<JsParsedPage>,
+    pub page_errors: Vec<JsPageError>,
     pub text: String,
     pub images: Vec<JsExtractedImage>,
     pub screenshots: Vec<JsScreenshotResult>,
@@ -903,6 +913,24 @@ pub struct JsParseResult {
     pub doc_meta: Option<JsDocumentMetadata>,
     /// Raw XFA packets; present only when `extractXfaPackets` is enabled.
     pub xfa_packets: Option<Vec<JsXfaPacket>>,
+}
+
+/// One batch of pages from a `ParseSession`.
+#[napi(object)]
+pub struct JsParseBatch {
+    /// First source page in this batch, 1-indexed.
+    pub start_page: u32,
+    /// Last source page in this batch, 1-indexed and inclusive.
+    pub end_page: u32,
+    /// The pages in `startPage..=endPage`, as an ordinary parse result.
+    pub result: JsParseResult,
+}
+
+#[napi(object)]
+#[derive(Clone)]
+pub struct JsPageError {
+    pub page_num: u32,
+    pub message: String,
 }
 
 #[napi(object)]
@@ -1150,10 +1178,19 @@ impl JsPageComplexityStats {
 impl JsParseResult {
     pub fn from_rust(result: &ParseResult, config: &LiteParseConfig) -> Self {
         Self {
+            total_pages: result.total_pages,
             pages: result
                 .pages
                 .iter()
                 .map(|page| JsParsedPage::from_rust(page, config.extract_text_metadata))
+                .collect(),
+            page_errors: result
+                .page_errors
+                .iter()
+                .map(|error| JsPageError {
+                    page_num: error.page_number,
+                    message: error.message.clone(),
+                })
                 .collect(),
             text: result.text.clone(),
             image_error_count: result.image_error_count,

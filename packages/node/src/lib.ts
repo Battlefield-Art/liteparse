@@ -31,6 +31,8 @@ export interface LiteParseConfig {
   targetPages?: string;
   /** Render parsed pages to PNG and return them in `ParseResult.screenshots`. */
   extractScreenshots: boolean;
+  /** Continue after page-level extraction failures and collect `pageErrors`. */
+  continueOnPageError: boolean;
   dpi: number;
   outputFormat: OutputFormat;
   /** How to surface raster images in markdown output (default: "placeholder"). */
@@ -350,7 +352,11 @@ export interface ExtractedImage {
 }
 
 export interface ParseResult {
+  /** Total source-document pages before `targetPages` or `maxPages` filtering. */
+  totalPages: number;
   pages: ParsedPage[];
+  /** Page-level PDFium extraction failures when tolerance is enabled. */
+  pageErrors: Array<{ pageNum: number; message: string }>;
   text: string;
   /** Populated only when `extractImages` is true. */
   images: ExtractedImage[];
@@ -372,6 +378,21 @@ export interface ParseResult {
   docMeta?: DocumentMetadata;
   /** Raw XFA packets; present only when `extractXfaPackets` is enabled. */
   xfaPackets?: XfaPacket[];
+}
+
+export interface ParseBatchOptions {
+  /** Pages materialized in one batch. Default: 25. */
+  batchSize?: number;
+}
+
+export interface ParseBatch {
+  /** First source page in this batch (1-indexed). */
+  startPage: number;
+  /** Last source page in this batch (1-indexed, inclusive). */
+  endPage: number;
+  /** Total source-document pages, before the parser's `maxPages` cap. */
+  totalPages: number;
+  result: ParseResult;
 }
 
 /** Provenance and tamper-analysis facts extracted from the source PDF. */
@@ -537,6 +558,7 @@ export class LiteParse {
       maxPages: userConfig.maxPages,
       targetPages: userConfig.targetPages,
       extractScreenshots: userConfig.extractScreenshots,
+      continueOnPageError: userConfig.continueOnPageError,
       dpi: userConfig.dpi,
       outputFormat: userConfig.outputFormat,
       imageMode: userConfig.imageMode,
@@ -579,6 +601,7 @@ export class LiteParse {
       maxPages: resolved.maxPages ?? 1000,
       targetPages: resolved.targetPages ?? undefined,
       extractScreenshots: resolved.extractScreenshots ?? false,
+      continueOnPageError: resolved.continueOnPageError ?? false,
       dpi: resolved.dpi ?? 150,
       outputFormat: (resolved.outputFormat as OutputFormat) ?? "json",
       imageMode: (resolved.imageMode as ImageMode) ?? "placeholder",
@@ -614,18 +637,59 @@ export class LiteParse {
     const nativeInput =
       typeof input === "string" ? input : Buffer.from(input);
     const result: NativeParseResult = await this._native.parse(nativeInput);
-    return {
-      pages: result.pages.map(toPage),
-      text: result.text,
-      images: (result.images ?? []).map(toImage),
-      screenshots: (result.screenshots ?? []).map(toScreenshot),
-      imageErrorCount: result.imageErrorCount ?? 0,
-      formType: result.formType,
-      creator: result.creator,
-      producer: result.producer,
-      docMeta: result.docMeta,
-      xfaPackets: result.xfaPackets,
-    };
+    return toParseResult(result);
+  }
+
+  /**
+   * Parse a document in bounded-memory page batches of `batchSize` pages.
+   *
+   * Each yielded result is independent and becomes collectible once the caller
+   * advances the iterator, so a consumer that does not retain batches never
+   * holds more than one batch of pages in memory. A non-PDF source is
+   * converted once when the iterator starts, not once per batch; its temporary
+   * file is released when iteration ends — including an early `break` or
+   * `throw`, which run the generator's cleanup.
+   *
+   * Cross-page passes see only the pages in their own batch, so repeated
+   * header/footer removal and image deduplication are batch-local and the
+   * output can differ from `parse()`. Prefer `parse()` unless the size of the
+   * materialized result is the problem.
+   *
+   * As with any async generator, work starts on the first `next()` call, so
+   * errors (an unreadable file, or a parser configured with `targetPages` —
+   * ambiguous with generated batch ranges) surface on the first iteration
+   * rather than when `parseBatches()` itself is called.
+   */
+  async *parseBatches(
+    input: LiteParseInput,
+    options: ParseBatchOptions = {},
+  ): AsyncGenerator<ParseBatch> {
+    const nativeInput = typeof input === "string" ? input : Buffer.from(input);
+    const session = await this._native.openBatchSession(
+      nativeInput,
+      options.batchSize,
+    );
+    try {
+      const totalPages = session.totalPages;
+
+      for (;;) {
+        const batch = await session.nextBatch();
+        if (batch == null) {
+          return;
+        }
+        yield {
+          startPage: batch.startPage,
+          endPage: batch.endPage,
+          totalPages,
+          result: toParseResult(batch.result),
+        };
+      }
+    } finally {
+      // Frees the session's converted-PDF temp file now instead of at GC —
+      // this runs on normal exhaustion and when the consumer abandons the
+      // loop early.
+      await session.close();
+    }
   }
 
   /**
@@ -643,14 +707,7 @@ export class LiteParse {
       graphics: p.graphics,
     }));
     const result = this._native.parsePages(nativePages);
-    return {
-      pages: result.pages.map(toPage),
-      text: result.text,
-      images: (result.images ?? []).map(toImage),
-      screenshots: (result.screenshots ?? []).map(toScreenshot),
-      imageErrorCount: result.imageErrorCount ?? 0,
-      docMeta: result.docMeta,
-    };
+    return toParseResult(result);
   }
 
   /**
@@ -718,6 +775,23 @@ function toComplexity(s: NativePageComplexityStats): PageComplexityStats {
           reasons: s.layout.reasons,
         }
       : undefined,
+  };
+}
+
+function toParseResult(result: NativeParseResult): ParseResult {
+  return {
+    totalPages: result.totalPages,
+    pages: result.pages.map(toPage),
+    pageErrors: result.pageErrors ?? [],
+    text: result.text,
+    images: (result.images ?? []).map(toImage),
+    screenshots: (result.screenshots ?? []).map(toScreenshot),
+    imageErrorCount: result.imageErrorCount ?? 0,
+    formType: result.formType,
+    creator: result.creator,
+    producer: result.producer,
+    docMeta: result.docMeta,
+    xfaPackets: result.xfaPackets,
   };
 }
 
