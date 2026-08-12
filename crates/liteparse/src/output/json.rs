@@ -429,7 +429,7 @@ mod tests {
         assert_eq!(value["images"][0]["duplicate_of"], "p1_0");
         assert!(value["images"][0].get("bytes").is_none());
         assert_eq!(value["image_error_count"], 2);
-        assert_eq!(value["page_errors"][0]["page_number"], 3);
+        assert_eq!(value["page_errors"][0]["page"], 3);
         assert_eq!(value["page_errors"][0]["message"], "page extraction failed");
     }
 

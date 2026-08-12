@@ -381,6 +381,24 @@ fn parse_image_mode(s: &str) -> Result<liteparse::config::ImageMode, String> {
     }
 }
 
+/// Surface tolerated page failures on stderr. JSON output carries
+/// `page_errors` itself, but text/markdown would otherwise silently omit the
+/// failed pages, so this prints unconditionally (not gated on `--quiet`).
+fn warn_page_errors(result: &liteparse::parser::ParseResult, file: Option<&str>) {
+    for error in &result.page_errors {
+        match file {
+            Some(file) => eprintln!(
+                "[liteparse] {}: page {} failed to extract and was skipped: {}",
+                file, error.page_number, error.message
+            ),
+            None => eprintln!(
+                "[liteparse] page {} failed to extract and was skipped: {}",
+                error.page_number, error.message
+            ),
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
@@ -429,6 +447,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             } else {
                 lp.parse(&cmd.file).await?
             };
+            warn_page_errors(&result, None);
             let formatted = match lp.config().output_format {
                 OutputFormat::Json => {
                     json::format_json_result(&result, lp.config().extract_text_metadata)?
@@ -558,6 +577,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                 match lp.parse(file_path).await {
                     Ok(result) => {
+                        warn_page_errors(&result, Some(file_path));
                         let fmt_result: Result<String, Box<dyn std::error::Error>> =
                             match lp.config().output_format {
                                 OutputFormat::Json => json::format_json_result(

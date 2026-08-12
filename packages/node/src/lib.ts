@@ -700,15 +700,7 @@ export class LiteParse {
       graphics: p.graphics,
     }));
     const result = this._native.parsePages(nativePages);
-    return {
-      totalPages: result.totalPages,
-      pages: result.pages.map(toPage),
-      pageErrors: result.pageErrors ?? [],
-      text: result.text,
-      images: (result.images ?? []).map(toImage),
-      imageErrorCount: result.imageErrorCount ?? 0,
-      docMeta: result.docMeta,
-    };
+    return toParseResult(result);
   }
 
   /**

@@ -93,6 +93,10 @@ program
     "--target-pages <pages>",
     'Pages to parse (e.g., "1-5,10,15-20")',
   )
+  .option(
+    "--continue-on-page-error",
+    "Continue after page-level extraction errors and report them in JSON",
+  )
   .option("--dpi <dpi>", "Rendering DPI", parseFloat)
   .option("--preserve-small-text", "Keep very small text")
   .option(
@@ -145,6 +149,7 @@ program
       if (opts.ocrLanguage) config.ocrLanguage = opts.ocrLanguage as string;
       if (opts.maxPages) config.maxPages = opts.maxPages as number;
       if (opts.targetPages) config.targetPages = opts.targetPages as string;
+      if (opts.continueOnPageError) config.continueOnPageError = true;
       if (opts.dpi) config.dpi = opts.dpi as number;
       if (opts.preserveSmallText) config.preserveVerySmallText = true;
       if (opts.extractTextMetadata) config.extractTextMetadata = true;
@@ -159,6 +164,14 @@ program
 
       const parser = new LiteParse(config);
       const result = await parser.parse(await resolveInput(file));
+
+      // JSON output carries pageErrors itself; text/markdown would silently
+      // omit the failed pages, so always surface them on stderr.
+      for (const error of result.pageErrors) {
+        console.error(
+          `[liteparse] page ${error.pageNum} failed to extract and was skipped: ${error.message}`,
+        );
+      }
 
       const output =
         config.outputFormat === "json"

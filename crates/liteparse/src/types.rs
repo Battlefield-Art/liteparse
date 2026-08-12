@@ -247,7 +247,9 @@ pub struct Page {
 /// A page that could not be extracted while tolerant page errors were enabled.
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct PageError {
-    /// Source page number (1-indexed).
+    /// Source page number (1-indexed). Serialized as `page` to match the
+    /// sibling per-page fields in the JSON output (`pages[]`, `images[]`).
+    #[serde(rename = "page")]
     pub page_number: u32,
     /// Human-readable extraction failure.
     pub message: String,
