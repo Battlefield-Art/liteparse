@@ -68,6 +68,13 @@ export interface JsLiteParseConfig {
   keepHeadersFooters?: boolean
   /** Extract all PDF annotations as page-scoped structured data. */
   extractAnnotations?: boolean
+  /**
+   * Emit each page's classified layout blocks (headings, paragraphs, list
+   * items, tables with per-cell boxes, code, rules, figures) with bounding
+   * boxes as `ParsedPage.blocks`. Default false. Independent of
+   * `outputFormat`; enabling it never changes the rendered markdown.
+   */
+  extractBlocks?: boolean
   /** Extract AcroForm widget fields and values. */
   extractFormFields?: boolean
   /** Extract the tagged-PDF logical structure tree. */
@@ -247,6 +254,11 @@ export interface JsParsedPage {
   complexity?: JsPageComplexityStats
   vectorGraphics?: JsVectorGraphics
   annotations?: Array<JsDocumentAnnotation>
+  /**
+   * Classified layout blocks in reading order; present only when
+   * `extractBlocks` is enabled.
+   */
+  blocks?: Array<JsLayoutBlock>
   formFields?: Array<JsFormField>
   structureTree?: JsStructureTree
 }
@@ -334,6 +346,66 @@ export interface JsFormField {
   options: Array<string>
   selectedOptions: Array<string>
 }
+/**
+ * One table cell: its rendered text and the region it occupied. `bbox` is
+ * absent for cells with no ink behind them (padding for a ragged grid, or a
+ * merged run split at an estimated boundary).
+ */
+export interface JsLayoutCell {
+  text: string
+  bbox?: JsAnnotationRect
+}
+/**
+ * A classified block plus where it sits on the page. Flat by design — `kind`
+ * discriminates the block and every field that doesn't apply to that kind is
+ * absent.
+ */
+export interface JsLayoutBlock {
+  /**
+   * One of `heading`, `paragraph`, `list_item`, `code`, `table`,
+   * `grid_fallback`, `rule`, `figure`.
+   */
+  kind: string
+  /**
+   * Rendered text for the text-bearing kinds (`heading`, `paragraph`,
+   * `list_item`). Table text lives in `header`/`rows`; code and grid text in
+   * `lines`.
+   */
+  text?: string
+  /** Heading level (1–6), or list nesting depth for `list_item`. */
+  level?: number
+  /**
+   * Whether the block's text is uniformly bold / italic. `paragraph` and
+   * `list_item` only; false otherwise.
+   */
+  bold: boolean
+  italic: boolean
+  /**
+   * `list_item`: whether the list is ordered, and the original marker as it
+   * appeared on the page (`138.`, `iii)`, `•`).
+   */
+  ordered?: boolean
+  marker?: string
+  /** Verbatim source lines for `code` and `grid_fallback`. */
+  lines?: Array<string>
+  /** Best-effort language hint for `code`. */
+  lang?: string
+  /** `table`: the header row, when one was detected. */
+  header?: Array<JsLayoutCell>
+  /** `table`: the body rows. */
+  rows?: Array<Array<JsLayoutCell>>
+  /**
+   * `figure`: the image's page-scoped id and encoded format, matching the
+   * `img_{id}.{format}` target the markdown renderer emits.
+   */
+  id?: string
+  format?: string
+  /**
+   * Region of the page this block occupies, in the same viewport space as
+   * `textItems`. Absent when the block has no page geometry behind it.
+   */
+  bbox?: JsAnnotationRect
+}
 export interface JsParseResult {
   /** Total source-document pages before target/max-page filtering. */
   totalPages: number
@@ -356,10 +428,6 @@ export interface JsParseResult {
   /** Raw XFA packets; present only when `extractXfaPackets` is enabled. */
   xfaPackets?: Array<JsXfaPacket>
 }
-export interface JsPageError {
-  pageNum: number
-  message: string
-}
 /** One batch of pages from a `ParseSession`. */
 export interface JsParseBatch {
   /** First source page in this batch, 1-indexed. */
@@ -368,6 +436,10 @@ export interface JsParseBatch {
   endPage: number
   /** The pages in `startPage..=endPage`, as an ordinary parse result. */
   result: JsParseResult
+}
+export interface JsPageError {
+  pageNum: number
+  message: string
 }
 export interface JsDocumentMetadata {
   creationDate?: string

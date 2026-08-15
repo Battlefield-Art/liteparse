@@ -92,6 +92,11 @@ struct ParseCommand {
     /// Include the tagged-PDF logical structure tree.
     #[arg(long)]
     extract_structure_tree: bool,
+    /// Include each page's classified layout blocks (headings, paragraphs,
+    /// list items, tables with per-cell boxes, code, rules, figures) with
+    /// bounding boxes, in reading order.
+    #[arg(long)]
+    extract_blocks: bool,
     /// Include raw XFA packets (name + XML content) in JSON output.
     #[arg(long)]
     extract_xfa_packets: bool,
@@ -197,6 +202,11 @@ struct BatchParseCommand {
     /// Include the tagged-PDF logical structure tree.
     #[arg(long)]
     extract_structure_tree: bool,
+    /// Include each page's classified layout blocks (headings, paragraphs,
+    /// list items, tables with per-cell boxes, code, rules, figures) with
+    /// bounding boxes, in reading order.
+    #[arg(long)]
+    extract_blocks: bool,
     /// Include raw XFA packets (name + XML content) in JSON output.
     #[arg(long)]
     extract_xfa_packets: bool,
@@ -288,6 +298,7 @@ pub fn run_cli(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
                 extract_annotations: cmd.extract_annotations,
                 extract_form_fields: cmd.extract_form_fields,
                 extract_structure_tree: cmd.extract_structure_tree,
+                extract_blocks: cmd.extract_blocks,
                 extract_xfa_packets: cmd.extract_xfa_packets,
                 extract_content_bounds: cmd.extract_content_bounds,
                 include_complexity: cmd.complexity,
@@ -393,6 +404,7 @@ pub fn run_cli(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
                 extract_annotations: cmd.extract_annotations,
                 extract_form_fields: cmd.extract_form_fields,
                 extract_structure_tree: cmd.extract_structure_tree,
+                extract_blocks: cmd.extract_blocks,
                 extract_xfa_packets: cmd.extract_xfa_packets,
                 extract_content_bounds: cmd.extract_content_bounds,
                 ..Default::default()

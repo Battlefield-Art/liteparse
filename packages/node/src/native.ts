@@ -39,6 +39,7 @@ export interface LiteParseNativeConfig {
   extractAnnotations?: boolean;
   extractFormFields?: boolean;
   extractStructureTree?: boolean;
+  extractBlocks?: boolean;
   extractXfaPackets?: boolean;
   extractDocumentMetadata?: boolean;
   extractContentBounds?: boolean;
@@ -142,6 +143,29 @@ export interface NativeParsedPage {
   annotations?: NativeDocumentAnnotation[];
   formFields?: NativeFormField[];
   structureTree?: NativeStructureTree;
+  blocks?: NativeLayoutBlock[];
+}
+
+export interface NativeLayoutCell {
+  text: string;
+  bbox?: NativeRect;
+}
+
+export interface NativeLayoutBlock {
+  kind: string;
+  text?: string;
+  level?: number;
+  bold?: boolean;
+  italic?: boolean;
+  ordered?: boolean;
+  marker?: string;
+  lines?: string[];
+  lang?: string;
+  header?: NativeLayoutCell[];
+  rows?: NativeLayoutCell[][];
+  id?: string;
+  format?: string;
+  bbox?: NativeRect;
 }
 
 export interface NativeStructureAttribute {

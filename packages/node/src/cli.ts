@@ -73,6 +73,10 @@ program
   .option("--extract-form-fields", "Include AcroForm widget fields and values")
   .option("--extract-structure-tree", "Include the tagged-PDF logical structure tree")
   .option(
+    "--extract-blocks",
+    "Include each page's classified layout blocks with bounding boxes",
+  )
+  .option(
     "--extract-xfa-packets",
     "Include raw XFA packets (name + XML content) in JSON output",
   )
@@ -139,6 +143,7 @@ program
       if (opts.extractAnnotations) config.extractAnnotations = true;
       if (opts.extractFormFields) config.extractFormFields = true;
       if (opts.extractStructureTree) config.extractStructureTree = true;
+      if (opts.extractBlocks) config.extractBlocks = true;
       if (opts.extractXfaPackets) config.extractXfaPackets = true;
       if (opts.extractContentBounds) config.extractContentBounds = true;
       if (opts.ocrServerUrl)
@@ -353,6 +358,10 @@ program
   .option("--extract-form-fields", "Include AcroForm widget fields and values")
   .option("--extract-structure-tree", "Include the tagged-PDF logical structure tree")
   .option(
+    "--extract-blocks",
+    "Include each page's classified layout blocks with bounding boxes",
+  )
+  .option(
     "--extract-xfa-packets",
     "Include raw XFA packets (name + XML content) in JSON output",
   )
@@ -390,6 +399,7 @@ program
         if (opts.extractAnnotations) config.extractAnnotations = true;
         if (opts.extractFormFields) config.extractFormFields = true;
         if (opts.extractStructureTree) config.extractStructureTree = true;
+        if (opts.extractBlocks) config.extractBlocks = true;
         if (opts.extractXfaPackets) config.extractXfaPackets = true;
         if (opts.extractContentBounds) config.extractContentBounds = true;
       if (opts.extractContentBounds) config.extractContentBounds = true;

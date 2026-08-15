@@ -231,6 +231,54 @@ pub struct LiteParse {
     glyph_resolver: Option<std::sync::Arc<dyn crate::GlyphResolver>>,
 }
 
+/// Run block classification once and fan the result out to everything that
+/// needs it: the rendered per-page markdown (when Markdown is the output
+/// format) and each page's `blocks` (when `extract_blocks` is on).
+///
+/// Classification is the expensive part of the markdown pipeline, so the two
+/// consumers share a single pass rather than each triggering their own. Returns
+/// the joined document markdown when that is the output format.
+fn apply_layout(
+    config: &crate::config::LiteParseConfig,
+    parsed_pages: &mut [ParsedPage],
+    outline: &[OutlineTarget],
+) -> Option<String> {
+    let wants_markdown = config.output_format == crate::config::OutputFormat::Markdown;
+    if !wants_markdown && !config.extract_blocks {
+        return None;
+    }
+    let classified = markdown::classify_document(
+        parsed_pages,
+        outline,
+        config.image_mode,
+        config.keep_headers_footers,
+    );
+    if config.extract_blocks {
+        for (page, blocks) in parsed_pages.iter_mut().zip(&classified) {
+            // A page with no structural decomposition reports an empty list,
+            // not `None` — extraction *was* enabled, there was just nothing to
+            // decompose.
+            page.blocks = Some(
+                blocks
+                    .as_deref()
+                    .unwrap_or_default()
+                    .iter()
+                    .map(crate::layout::LayoutBlock::from)
+                    .collect(),
+            );
+        }
+    }
+    if !wants_markdown {
+        return None;
+    }
+    let page_md = markdown::render_classified(parsed_pages, &classified);
+    let md = page_md.join("\n\n-----\n\n");
+    for (page, page_md) in parsed_pages.iter_mut().zip(page_md) {
+        page.markdown = page_md;
+    }
+    Some(md)
+}
+
 impl LiteParse {
     pub fn new(config: LiteParseConfig) -> Self {
         Self {
@@ -790,17 +838,8 @@ impl LiteParse {
             t2.duration_since(t_ocr).as_secs_f64() * 1000.0
         ));
 
-        let mut full_text = if self.config.output_format == crate::config::OutputFormat::Markdown {
-            let page_md = markdown::format_markdown_pages(
-                &parsed_pages,
-                &outline,
-                self.config.image_mode,
-                self.config.keep_headers_footers,
-            );
-            let md = page_md.join("\n\n-----\n\n");
-            for (page, md) in parsed_pages.iter_mut().zip(page_md) {
-                page.markdown = md;
-            }
+        let laid_out = apply_layout(&self.config, &mut parsed_pages, &outline);
+        let mut full_text = if let Some(md) = laid_out {
             let t3 = web_time::Instant::now();
             log(&format!(
                 "[liteparse] markdown: {:.1}ms",
@@ -857,17 +896,7 @@ impl LiteParse {
         let total_pages = pages.len().min(u32::MAX as usize) as u32;
         let mut parsed_pages = projection::project_pages_to_grid(pages);
 
-        let full_text = if self.config.output_format == crate::config::OutputFormat::Markdown {
-            let page_md = markdown::format_markdown_pages(
-                &parsed_pages,
-                &outline,
-                self.config.image_mode,
-                self.config.keep_headers_footers,
-            );
-            let md = page_md.join("\n\n-----\n\n");
-            for (page, md) in parsed_pages.iter_mut().zip(page_md) {
-                page.markdown = md;
-            }
+        let full_text = if let Some(md) = apply_layout(&self.config, &mut parsed_pages, &outline) {
             md
         } else {
             parsed_pages
@@ -1254,6 +1283,7 @@ mod tests {
             annotations: None,
             form_fields: None,
             structure_tree: None,
+            blocks: None,
         }];
         let mut full_text = pages[0].markdown.clone();
         let images = vec![

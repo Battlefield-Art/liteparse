@@ -263,6 +263,113 @@ impl PyDocumentAnnotation {
     }
 }
 
+/// One table cell: its rendered text and the region it occupied.
+///
+/// `bbox` is `None` for cells with no ink behind them — padding inserted to
+/// square off a ragged grid, or halves of a merged run split at an estimated
+/// position rather than an observed boundary.
+#[pyclass(frozen, from_py_object)]
+#[derive(Clone)]
+struct PyLayoutCell {
+    #[pyo3(get)]
+    text: String,
+    #[pyo3(get)]
+    bbox: Option<PyAnnotationRect>,
+}
+
+impl PyLayoutCell {
+    fn from_rust(cell: liteparse::layout::LayoutCell) -> Self {
+        Self {
+            text: cell.text,
+            bbox: cell.bbox.map(PyAnnotationRect::from_rust),
+        }
+    }
+}
+
+/// A classified block plus where it sits on the page.
+///
+/// `kind` discriminates the block; every field that doesn't apply to a block's
+/// kind is `None` (or `False` for the flags). Blocks appear in reading order,
+/// matching the order the markdown renderer emits them.
+#[pyclass(frozen, from_py_object)]
+#[derive(Clone)]
+struct PyLayoutBlock {
+    /// One of `heading`, `paragraph`, `list_item`, `code`, `table`,
+    /// `grid_fallback`, `rule`, `figure`.
+    #[pyo3(get)]
+    kind: String,
+    /// Rendered text for the text-bearing kinds (`heading`, `paragraph`,
+    /// `list_item`). Table text lives in `header`/`rows`; code and grid text in
+    /// `lines`.
+    #[pyo3(get)]
+    text: Option<String>,
+    /// Heading level (1–6), or list nesting depth for `list_item`.
+    #[pyo3(get)]
+    level: Option<u8>,
+    /// Whether the block's text is uniformly bold / italic. `paragraph` and
+    /// `list_item` only.
+    #[pyo3(get)]
+    bold: bool,
+    #[pyo3(get)]
+    italic: bool,
+    /// `list_item`: whether the list is ordered, and the original marker as it
+    /// appeared on the page (`138.`, `iii)`, `•`).
+    #[pyo3(get)]
+    ordered: Option<bool>,
+    #[pyo3(get)]
+    marker: Option<String>,
+    /// Verbatim source lines for `code` and `grid_fallback`.
+    #[pyo3(get)]
+    lines: Option<Vec<String>>,
+    /// Best-effort language hint for `code`.
+    #[pyo3(get)]
+    lang: Option<String>,
+    /// `table`: the header row, when one was detected.
+    #[pyo3(get)]
+    header: Option<Vec<PyLayoutCell>>,
+    /// `table`: the body rows.
+    #[pyo3(get)]
+    rows: Option<Vec<Vec<PyLayoutCell>>>,
+    /// `figure`: the image's page-scoped id and encoded format, matching the
+    /// `img_{id}.{format}` target the markdown renderer emits.
+    #[pyo3(get)]
+    id: Option<String>,
+    #[pyo3(get)]
+    format: Option<String>,
+    /// Region of the page this block occupies, in the same top-left, 72-DPI
+    /// viewport space as `text_items`. `None` when the block has no page
+    /// geometry behind it.
+    #[pyo3(get)]
+    bbox: Option<PyAnnotationRect>,
+}
+
+impl PyLayoutBlock {
+    fn from_rust(block: liteparse::layout::LayoutBlock) -> Self {
+        Self {
+            kind: block.kind.to_string(),
+            text: block.text,
+            level: block.level,
+            bold: block.bold,
+            italic: block.italic,
+            ordered: block.ordered,
+            marker: block.marker,
+            lines: block.lines,
+            lang: block.lang,
+            header: block
+                .header
+                .map(|cells| cells.into_iter().map(PyLayoutCell::from_rust).collect()),
+            rows: block.rows.map(|rows| {
+                rows.into_iter()
+                    .map(|row| row.into_iter().map(PyLayoutCell::from_rust).collect())
+                    .collect()
+            }),
+            id: block.id,
+            format: block.format,
+            bbox: block.bbox.map(PyAnnotationRect::from_rust),
+        }
+    }
+}
+
 #[pyclass(frozen, from_py_object)]
 #[derive(Clone)]
 struct PyFormField {
@@ -433,6 +540,8 @@ struct PyParsedPage {
     form_fields: Option<Vec<PyFormField>>,
     #[pyo3(get)]
     structure_tree: Option<PyStructureTree>,
+    #[pyo3(get)]
+    blocks: Option<Vec<PyLayoutBlock>>,
 }
 
 #[pyclass(frozen, from_py_object)]
@@ -589,6 +698,9 @@ impl PyParsedPage {
                     .map(PyStructureTreeElement::from_rust)
                     .collect(),
             }),
+            blocks: page
+                .blocks
+                .map(|blocks| blocks.into_iter().map(PyLayoutBlock::from_rust).collect()),
         }
     }
 }
@@ -1125,6 +1237,8 @@ struct PyLiteParseConfig {
     #[pyo3(get)]
     extract_structure_tree: bool,
     #[pyo3(get)]
+    extract_blocks: bool,
+    #[pyo3(get)]
     extract_xfa_packets: bool,
     #[pyo3(get)]
     extract_document_metadata: bool,
@@ -1202,6 +1316,7 @@ impl PyLiteParseConfig {
             extract_annotations: cfg.extract_annotations,
             extract_form_fields: cfg.extract_form_fields,
             extract_structure_tree: cfg.extract_structure_tree,
+            extract_blocks: cfg.extract_blocks,
             extract_xfa_packets: cfg.extract_xfa_packets,
             extract_document_metadata: cfg.extract_document_metadata,
             extract_content_bounds: cfg.extract_content_bounds,
@@ -1333,6 +1448,7 @@ impl LiteParse {
         extract_annotations = None,
         extract_form_fields = None,
         extract_structure_tree = None,
+        extract_blocks = None,
         extract_xfa_packets = None,
         extract_document_metadata = None,
         extract_content_bounds = None,
@@ -1371,6 +1487,7 @@ impl LiteParse {
         extract_annotations: Option<bool>,
         extract_form_fields: Option<bool>,
         extract_structure_tree: Option<bool>,
+        extract_blocks: Option<bool>,
         extract_xfa_packets: Option<bool>,
         extract_document_metadata: Option<bool>,
         extract_content_bounds: Option<bool>,
@@ -1462,6 +1579,9 @@ impl LiteParse {
         }
         if let Some(v) = extract_structure_tree {
             cfg.extract_structure_tree = v;
+        }
+        if let Some(v) = extract_blocks {
+            cfg.extract_blocks = v;
         }
         if let Some(v) = extract_xfa_packets {
             cfg.extract_xfa_packets = v;
@@ -1765,6 +1885,8 @@ fn _liteparse(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyStructureAttribute>()?;
     m.add_class::<PyStructureTreeElement>()?;
     m.add_class::<PyStructureTree>()?;
+    m.add_class::<PyLayoutCell>()?;
+    m.add_class::<PyLayoutBlock>()?;
     m.add_class::<PyFormField>()?;
     m.add_class::<PyScreenshotResult>()?;
     m.add_class::<PyScreenshotRect>()?;

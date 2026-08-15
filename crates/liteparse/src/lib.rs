@@ -18,6 +18,7 @@ pub use types::{DocumentMetadata, ParsedPage, TextItem, WordBox};
 pub mod config;
 pub mod error;
 pub mod glyph_resolver;
+pub mod layout;
 pub mod parser;
 pub mod search;
 pub mod types;

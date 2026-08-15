@@ -9,6 +9,8 @@ from liteparse._liteparse import search_items as _native_search_items
 from .types import (
     AnnotationRect,
     DocumentAnnotation,
+    LayoutBlock,
+    LayoutCell,
     FormField,
     StructureTree,
     StructureTreeElement,
@@ -32,6 +34,45 @@ from .types import (
     VectorLine,
     VectorShape,
 )
+
+
+def _convert_rect(rect: Any) -> Optional[AnnotationRect]:
+    if rect is None:
+        return None
+    return AnnotationRect(
+        x=rect.x, y=rect.y, width=rect.width, height=rect.height
+    )
+
+
+def _convert_cell(cell: Any) -> LayoutCell:
+    return LayoutCell(text=cell.text, bbox=_convert_rect(cell.bbox))
+
+
+def _convert_block(block: Any) -> LayoutBlock:
+    return LayoutBlock(
+        kind=block.kind,
+        text=block.text,
+        level=block.level,
+        bold=block.bold,
+        italic=block.italic,
+        ordered=block.ordered,
+        marker=block.marker,
+        lines=list(block.lines) if block.lines is not None else None,
+        lang=block.lang,
+        header=(
+            [_convert_cell(c) for c in block.header]
+            if block.header is not None
+            else None
+        ),
+        rows=(
+            [[_convert_cell(c) for c in row] for row in block.rows]
+            if block.rows is not None
+            else None
+        ),
+        id=block.id,
+        format=block.format,
+        bbox=_convert_rect(block.bbox),
+    )
 
 
 def _convert_annotation(annotation: Any) -> DocumentAnnotation:
@@ -158,6 +199,7 @@ def _convert_native_result(native_result: Any) -> ParseResult:
         native_annotations = getattr(native_page, "annotations", None)
         native_form_fields = getattr(native_page, "form_fields", None)
         native_structure_tree = getattr(native_page, "structure_tree", None)
+        native_blocks = getattr(native_page, "blocks", None)
         pages.append(
             ParsedPage(
                 page_num=native_page.page_num,
@@ -285,6 +327,11 @@ def _convert_native_result(native_result: Any) -> ParseResult:
                         ]
                     )
                     if native_structure_tree is not None
+                    else None
+                ),
+                blocks=(
+                    [_convert_block(block) for block in native_blocks]
+                    if native_blocks is not None
                     else None
                 ),
             )
@@ -428,6 +475,7 @@ class LiteParse:
         extract_annotations: Optional[bool] = None,
         extract_form_fields: Optional[bool] = None,
         extract_structure_tree: Optional[bool] = None,
+        extract_blocks: Optional[bool] = None,
         extract_xfa_packets: Optional[bool] = None,
         extract_document_metadata: Optional[bool] = None,
         extract_content_bounds: Optional[bool] = None,
@@ -480,6 +528,10 @@ class LiteParse:
                 structured data (default: False).
             extract_form_fields: Include AcroForm widget fields and values as
                 page-scoped structured data (default: False).
+            extract_blocks: Emit each page's classified layout blocks with
+                bounding boxes. This is the same decomposition the Markdown
+                renderer consumes, exposed as data; enabling it never changes
+                the rendered Markdown.
             extract_structure_tree: Include the tagged-PDF logical structure
                 tree as page-scoped structured data (default: False).
             ocr_failure_fatal: Whether a systemic OCR failure (every OCR task
@@ -564,6 +616,8 @@ class LiteParse:
             kwargs["extract_form_fields"] = extract_form_fields
         if extract_structure_tree is not None:
             kwargs["extract_structure_tree"] = extract_structure_tree
+        if extract_blocks is not None:
+            kwargs["extract_blocks"] = extract_blocks
         if extract_xfa_packets is not None:
             kwargs["extract_xfa_packets"] = extract_xfa_packets
         if extract_document_metadata is not None:
@@ -815,6 +869,7 @@ class LiteParse:
             extract_annotations=cfg.extract_annotations,
             extract_form_fields=cfg.extract_form_fields,
             extract_structure_tree=cfg.extract_structure_tree,
+            extract_blocks=cfg.extract_blocks,
             ocr_failure_fatal=cfg.ocr_failure_fatal,
             ocr_hedge_delays_ms=list(cfg.ocr_hedge_delays_ms),
             emit_word_boxes=cfg.emit_word_boxes,

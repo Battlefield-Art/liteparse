@@ -51,6 +51,12 @@ export interface LiteParseConfig {
   extractFormFields: boolean;
   /** Extract the tagged-PDF logical structure tree (default: false). */
   extractStructureTree: boolean;
+  /**
+   * Emit each page's classified layout blocks with bounding boxes
+   * (default: false). This is the same decomposition the Markdown renderer
+   * consumes, exposed as data; enabling it never changes the rendered Markdown.
+   */
+  extractBlocks: boolean;
   /** Extract raw XFA packets (name + XML content) into `ParseResult.xfaPackets` (default: false). */
   extractXfaPackets: boolean;
   /**
@@ -249,6 +255,59 @@ export interface ParsedPage {
   formFields?: FormField[];
   /** Present only when `extractStructureTree` is enabled. */
   structureTree?: StructureTree;
+  /**
+   * Classified layout blocks in reading order — the same blocks, in the same
+   * order, the page's Markdown is built from. Present only when
+   * `extractBlocks` is enabled.
+   */
+  blocks?: LayoutBlock[];
+}
+
+/** One table cell: its text and the region of the page it was read from. */
+export interface LayoutCell {
+  text: string;
+  /**
+   * Absent for cells with no ink behind them — padding inserted to square off
+   * a ragged grid, or halves of a merged run split at an estimated position.
+   */
+  bbox?: Rect;
+}
+
+/** A classified block of page content, discriminated by `kind`. */
+export interface LayoutBlock {
+  kind:
+    | "heading"
+    | "paragraph"
+    | "list_item"
+    | "code"
+    | "table"
+    | "grid_fallback"
+    | "rule"
+    | "figure";
+  /** Rendered text for `heading`, `paragraph`, and `list_item`. */
+  text?: string;
+  /** Heading level (1-6), or list nesting depth for `list_item`. */
+  level?: number;
+  bold?: boolean;
+  italic?: boolean;
+  /** `list_item` only. `marker` is the marker as it appeared on the page. */
+  ordered?: boolean;
+  marker?: string;
+  /** Verbatim source lines for `code` and `grid_fallback`. */
+  lines?: string[];
+  /** Best-effort language hint for `code`. */
+  lang?: string;
+  /** `table` only. */
+  header?: LayoutCell[];
+  rows?: LayoutCell[][];
+  /** `figure` only, matching the `img_{id}.{format}` Markdown target. */
+  id?: string;
+  format?: string;
+  /**
+   * Region this block occupies, in the same top-left 72-DPI viewport space as
+   * `textItems`. The union of every source line that fed the block.
+   */
+  bbox?: Rect;
 }
 
 export type StructureAttributeValue = boolean | number | string;
@@ -569,6 +628,7 @@ export class LiteParse {
       extractAnnotations: userConfig.extractAnnotations,
       extractFormFields: userConfig.extractFormFields,
       extractStructureTree: userConfig.extractStructureTree,
+      extractBlocks: userConfig.extractBlocks,
       extractXfaPackets: userConfig.extractXfaPackets,
       extractDocumentMetadata: userConfig.extractDocumentMetadata,
       extractContentBounds: userConfig.extractContentBounds,
@@ -612,6 +672,7 @@ export class LiteParse {
       extractAnnotations: resolved.extractAnnotations ?? false,
       extractFormFields: resolved.extractFormFields ?? false,
       extractStructureTree: resolved.extractStructureTree ?? false,
+      extractBlocks: resolved.extractBlocks ?? false,
       extractXfaPackets: resolved.extractXfaPackets ?? false,
       extractDocumentMetadata: resolved.extractDocumentMetadata ?? false,
       extractContentBounds: resolved.extractContentBounds ?? false,
@@ -829,6 +890,7 @@ function toPage(p: NativeParsedPage): ParsedPage {
     structureTree: p.structureTree
       ? { roots: p.structureTree.roots.map(toStructureTreeElement) }
       : undefined,
+    blocks: p.blocks as LayoutBlock[] | undefined,
   };
 }
 
