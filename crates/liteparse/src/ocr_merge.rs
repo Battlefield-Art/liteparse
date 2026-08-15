@@ -1,3 +1,4 @@
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use crate::error::LiteParseError;
@@ -628,13 +629,19 @@ pub(crate) async fn ocr_and_merge_rendered(
         // unmappable Type3 text) so OCR can replace them. Without this,
         // garbled-but-spatially-present native text suppresses every OCR
         // result that overlaps it via the overlap check below, leaving the
-        // output stuck with unreadable text. We apply both per-item and
+        // output stuck with unreadable text. We apply per-item, per-font, and
         // per-page checks: short garbled labels ("GDWH", "XVG") can't be
-        // flagged alone, but their host page can.
-        if page_is_garbled(page) {
-            page.text_items.clear();
-        } else {
-            page.text_items.retain(|item| !is_unusable_native(item));
+        // flagged alone, but their font group or host page can.
+        match garbled_scope(page) {
+            GarbledScope::None => page.text_items.retain(|item| !is_unusable_native(item)),
+            GarbledScope::WholePage => page.text_items.clear(),
+            // Only the corrupt font's items go; text in the page's healthy
+            // fonts is still the best source for its part of the page, and
+            // keeping it lets the overlap check below suppress redundant OCR
+            // there while OCR fills in what was dropped.
+            GarbledScope::Fonts(fonts) => page
+                .text_items
+                .retain(|item| !fonts.contains(&item.font_name) && !is_unusable_native(item)),
         }
 
         // Only check overlap against native (already-extracted) PDF text. Comparing
@@ -849,28 +856,88 @@ fn count_letters_and_vowels(text: &str) -> (usize, usize) {
     (letters, vowels)
 }
 
+/// Minimum ASCII letters before a group of text is worth judging for garbling.
+/// Below this the vowel ratio is too noisy — an acronym run or a short label
+/// can sit near zero without being corrupt.
+const GARBLE_MIN_LETTERS: usize = 30;
+
+/// A font group must hold at least this share of the page's letters before its
+/// own vowel ratio can flag the page. Corruption travels with a font, so a
+/// broken map affects a substantial block of the page; requiring a real share
+/// keeps a stray caption or ticker run in an odd font from flagging a healthy
+/// page.
+const GARBLE_MIN_FONT_SHARE: f32 = 0.15;
+
+/// True when a body of text's vowel ratio is below the natural-language floor.
+/// Real Latin-script vowel ratios sit ~30–45% across English, Portuguese,
+/// Spanish, French, etc. A ratio under 20% is well outside any natural-language
+/// range and signals substitution-style corruption. (A simple +3 Caesar shift
+/// still leaves some U/Y letters from the original O/Y mapping, so a 10% bound
+/// is too tight to catch this in practice.)
+fn ratio_is_garbled(letters: usize, vowels: usize) -> bool {
+    letters >= GARBLE_MIN_LETTERS && vowels * 5 < letters
+}
+
+/// Which of a page's native text items are untrustworthy because they decode
+/// to garbage. Corruption is a property of a *font's* ToUnicode map, not of the
+/// page, so this is resolved per font group as well as page-wide.
+pub(crate) enum GarbledScope {
+    /// Nothing looks garbled.
+    None,
+    /// The page's text as a whole decodes to garbage — every native item is
+    /// suspect, including items too short to judge on their own.
+    WholePage,
+    /// Specific font groups are garbled while the rest of the page extracts
+    /// fine. Holds the `font_name` of each flagged group.
+    Fonts(HashSet<Option<String>>),
+}
+
 /// Page-level garbled check: even when individual items are too short to judge
-/// in isolation (e.g. "GDWH", "FXUUHQFB XVG"), a page whose aggregate vowel
-/// ratio collapses to single digits is almost certainly substitution-encoded.
-/// Used to drop all native items on the page before OCR merge, so short
-/// garbled labels don't suppress overlapping OCR results.
-fn page_is_garbled(page: &Page) -> bool {
+/// in isolation (e.g. "GDWH", "FXUUHQFB XVG"), text whose aggregate vowel ratio
+/// collapses is almost certainly substitution-encoded. Used to drop untrusted
+/// native items before OCR merge, so short garbled labels don't suppress
+/// overlapping OCR results.
+///
+/// Judged per font group, not only page-wide: a page mixing a healthy standard
+/// font with an embedded font whose ToUnicode map is wrong averages out to a
+/// natural-looking ratio, so a page-wide sum alone reports the page as clean
+/// while half its text is corrupt. The page-wide check is still applied first,
+/// since it catches pages whose fonts are individually too small to judge (and
+/// pages whose items carry no font name at all).
+fn garbled_scope(page: &Page) -> GarbledScope {
     let mut total_letters = 0usize;
     let mut total_vowels = 0usize;
+    // Keyed by font name, so text sharing a ToUnicode map is judged together.
+    let mut per_font: HashMap<Option<&str>, (usize, usize)> = HashMap::new();
     for it in &page.text_items {
         let (l, v) = count_letters_and_vowels(&it.text);
         total_letters += l;
         total_vowels += v;
+        let entry = per_font.entry(it.font_name.as_deref()).or_insert((0, 0));
+        entry.0 += l;
+        entry.1 += v;
     }
-    if total_letters < 30 {
-        return false;
+
+    if ratio_is_garbled(total_letters, total_vowels) {
+        return GarbledScope::WholePage;
     }
-    // Real Latin-script vowel ratios sit ~30–45% across English, Portuguese,
-    // Spanish, French, etc. A page-wide ratio under 20% is well outside any
-    // natural-language range and signals substitution-style corruption. (A
-    // simple +3 Caesar shift still leaves some U/Y letters from the original
-    // O/Y mapping, so a 10% bound is too tight to catch this in practice.)
-    total_vowels * 5 < total_letters
+
+    let min_share = (total_letters as f32 * GARBLE_MIN_FONT_SHARE).ceil() as usize;
+    let fonts: HashSet<Option<String>> = per_font
+        .into_iter()
+        .filter(|&(_, (letters, vowels))| letters >= min_share && ratio_is_garbled(letters, vowels))
+        .map(|(font, _)| font.map(str::to_string))
+        .collect();
+
+    if fonts.is_empty() {
+        GarbledScope::None
+    } else {
+        GarbledScope::Fonts(fonts)
+    }
+}
+
+fn page_is_garbled(page: &Page) -> bool {
+    !matches!(garbled_scope(page), GarbledScope::None)
 }
 
 /// Recover a discrete CCW rotation in degrees from a 4-point OCR polygon.
@@ -1231,6 +1298,114 @@ mod tests {
             form_fields: None,
             structure_tree: None,
         }
+    }
+
+    /// A page whose items carry per-item `(font_name, text)` pairs. Geometry is
+    /// irrelevant to the garble checks, so every item shares one bbox.
+    fn make_font_page(items: &[(&str, &str)]) -> Page {
+        let mut page = make_blank_page(1);
+        page.text_items = items
+            .iter()
+            .map(|(font, text)| TextItem {
+                text: (*text).into(),
+                font_name: Some((*font).to_string()),
+                width: 10.0,
+                height: 10.0,
+                ..Default::default()
+            })
+            .collect();
+        page
+    }
+
+    /// Caesar-shifted table text: the +11 letter / +3 digit map from the
+    /// mixed-font fixture in issue #413, applied to the visible row text.
+    const GARBLED_ROWS: &[&str] = &[
+        "Tepx Nzop Opdnctaetzy Bflyetej Cpgtph Olep",
+        "KI-334 Cpawlnpxpye Qtwepc Lddpxmwj 44 5359-30-34",
+        "KI-335 Azcelmwp Dpydzc Wzfdtyr 45 5359-30-35",
+        "KI-336 Nlwtmcletzy Mclnvpe 46 5359-30-36",
+    ];
+
+    const HEALTHY_PARAGRAPH: &[&str] = &[
+        "This fictional report is a public parser-routing fixture.",
+        "The upper section uses a standard font and extracts normally.",
+        "All names, identifiers, quantities, and dates are fabricated.",
+        "A PDF viewer still renders both sections as readable text.",
+    ];
+
+    #[test]
+    fn test_garbled_scope_clean_page() {
+        let items: Vec<(&str, &str)> = HEALTHY_PARAGRAPH
+            .iter()
+            .map(|t| ("Helvetica", *t))
+            .collect();
+        let page = make_font_page(&items);
+        assert!(matches!(garbled_scope(&page), GarbledScope::None));
+        assert!(!page_is_garbled(&page));
+    }
+
+    #[test]
+    fn test_garbled_scope_whole_page() {
+        let items: Vec<(&str, &str)> = GARBLED_ROWS.iter().map(|t| ("BadFont", *t)).collect();
+        let page = make_font_page(&items);
+        assert!(matches!(garbled_scope(&page), GarbledScope::WholePage));
+    }
+
+    /// Issue #413: healthy text in one font must not mask a corrupt ToUnicode
+    /// map in another. Page-wide the vowel ratio lands ~0.28 (natural-looking),
+    /// while the corrupt font group alone sits ~0.19.
+    #[test]
+    fn test_garbled_scope_mixed_fonts_flags_only_bad_font() {
+        let mut items: Vec<(&str, &str)> = HEALTHY_PARAGRAPH
+            .iter()
+            .map(|t| ("Helvetica", *t))
+            .collect();
+        items.extend(GARBLED_ROWS.iter().map(|t| ("BitstreamVeraSans-Roman", *t)));
+        let page = make_font_page(&items);
+
+        // The page-wide sum alone does not trip: this is the regression.
+        let (letters, vowels) = page.text_items.iter().fold((0, 0), |(l, v), it| {
+            let (il, iv) = count_letters_and_vowels(&it.text);
+            (l + il, v + iv)
+        });
+        assert!(!ratio_is_garbled(letters, vowels));
+
+        match garbled_scope(&page) {
+            GarbledScope::Fonts(fonts) => {
+                assert_eq!(fonts.len(), 1);
+                assert!(fonts.contains(&Some("BitstreamVeraSans-Roman".to_string())));
+            }
+            _ => panic!("expected only the corrupt font group to be flagged"),
+        }
+        assert!(page_is_garbled(&page));
+    }
+
+    /// A small run of low-vowel text (acronyms, tickers, part numbers) in its
+    /// own font must not flag an otherwise healthy page.
+    #[test]
+    fn test_garbled_scope_ignores_small_low_vowel_font() {
+        let mut items: Vec<(&str, &str)> = HEALTHY_PARAGRAPH
+            .iter()
+            .map(|t| ("Helvetica", *t))
+            .collect();
+        items.push(("TickerFont", "NYSE NASDAQ FTSE DAX SPX"));
+        let page = make_font_page(&items);
+        assert!(matches!(garbled_scope(&page), GarbledScope::None));
+    }
+
+    /// Items with no font name still fall back to the page-wide verdict.
+    #[test]
+    fn test_garbled_scope_without_font_names() {
+        let mut page = make_blank_page(1);
+        page.text_items = GARBLED_ROWS
+            .iter()
+            .map(|text| TextItem {
+                text: (*text).into(),
+                font_name: None,
+                ..Default::default()
+            })
+            .collect();
+        assert!(matches!(garbled_scope(&page), GarbledScope::WholePage));
     }
 
     fn make_rendered(idx: usize) -> RenderedPage {
