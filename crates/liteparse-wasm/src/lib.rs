@@ -106,6 +106,9 @@ pub struct LiteParseConfig {
     /// Draw AcroForm field appearances into OCR rasters (runs document
     /// open/JS actions). Default false.
     render_form_fields: Option<bool>,
+    /// Attach the markdown classifier's block decomposition to each page as
+    /// `ParsedPage.blocks`. Default false.
+    extract_blocks: Option<bool>,
 }
 
 /// A page sub-region as the fraction cropped from each side (top-left origin,
@@ -244,6 +247,9 @@ impl LiteParseConfig {
         if let Some(v) = self.render_form_fields {
             cfg.render_form_fields = v;
         }
+        if let Some(v) = self.extract_blocks {
+            cfg.extract_blocks = v;
+        }
         cfg.num_workers = 1;
         Ok(cfg)
     }
@@ -301,6 +307,7 @@ impl LiteParseConfig {
             extract_vector_graphics: Some(cfg.extract_vector_graphics),
             extract_text_metadata: Some(cfg.extract_text_metadata),
             render_form_fields: Some(cfg.render_form_fields),
+            extract_blocks: Some(cfg.extract_blocks),
         }
     }
 }
@@ -390,6 +397,10 @@ pub struct ParsedPage {
     pub form_fields: Option<Vec<FormField>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub structure_tree: Option<StructureTree>,
+    /// Classified layout blocks in reading order; present only when
+    /// `extractBlocks` is enabled.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub blocks: Option<Vec<LayoutBlock>>,
 }
 
 #[derive(Serialize, Tsify)]
@@ -484,6 +495,122 @@ impl DocumentAnnotation {
             rect: annotation.rect.as_ref().map(to_rect),
             quadpoint_rects: annotation.quadpoint_rects.iter().map(to_rect).collect(),
             uri: annotation.uri.clone(),
+        }
+    }
+}
+
+/// One table cell: its rendered text and the region it occupied.
+///
+/// `bbox` is absent for cells with no ink behind them — padding inserted to
+/// square off a ragged grid, or halves of a merged run split at an estimated
+/// position.
+#[derive(Serialize, Tsify)]
+#[tsify(into_wasm_abi)]
+#[serde(rename_all = "camelCase")]
+pub struct LayoutCell {
+    pub text: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bbox: Option<AnnotationRect>,
+}
+
+/// A classified block plus where it sits on the page.
+///
+/// `kind` discriminates the block and every field that doesn't apply to that
+/// kind is omitted, so a heading serializes as `{kind, text, level, bbox}`.
+/// Blocks appear in reading order, matching the page's markdown.
+#[derive(Serialize, Tsify)]
+#[tsify(into_wasm_abi)]
+#[serde(rename_all = "camelCase")]
+pub struct LayoutBlock {
+    /// One of `heading`, `paragraph`, `list_item`, `code`, `table`,
+    /// `grid_fallback`, `rule`, `figure`.
+    pub kind: String,
+    /// Rendered text for the text-bearing kinds (`heading`, `paragraph`,
+    /// `list_item`). Table text lives in `header`/`rows`; code and grid text
+    /// in `lines`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
+    /// Heading level (1–6), or list nesting depth for `list_item`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub level: Option<u8>,
+    /// Whether the block's text is uniformly bold / italic. `paragraph` and
+    /// `list_item` only; omitted when false.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub bold: bool,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub italic: bool,
+    /// `list_item`: whether the list is ordered, and the original marker as it
+    /// appeared on the page (`138.`, `iii)`, `•`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ordered: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub marker: Option<String>,
+    /// Verbatim source lines for `code` and `grid_fallback`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lines: Option<Vec<String>>,
+    /// Best-effort language hint for `code`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lang: Option<String>,
+    /// `table`: the header row, when one was detected.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub header: Option<Vec<LayoutCell>>,
+    /// `table`: the body rows.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rows: Option<Vec<Vec<LayoutCell>>>,
+    /// `figure`: the image's page-scoped id and encoded format, matching the
+    /// `img_{id}.{format}` target the markdown renderer emits.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub format: Option<String>,
+    /// Region of the page this block occupies, in the same top-left, 72-DPI
+    /// viewport space as `textItems`. Absent when the block has no page
+    /// geometry behind it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bbox: Option<AnnotationRect>,
+}
+
+fn to_annotation_rect(rect: &liteparse::types::Rect) -> AnnotationRect {
+    AnnotationRect {
+        x: rect.x,
+        y: rect.y,
+        width: rect.width,
+        height: rect.height,
+    }
+}
+
+impl LayoutCell {
+    fn from_rust(cell: &liteparse::layout::LayoutCell) -> Self {
+        Self {
+            text: cell.text.clone(),
+            bbox: cell.bbox.as_ref().map(to_annotation_rect),
+        }
+    }
+}
+
+impl LayoutBlock {
+    fn from_rust(block: &liteparse::layout::LayoutBlock) -> Self {
+        let cells = |row: &Vec<liteparse::layout::LayoutCell>| {
+            row.iter().map(LayoutCell::from_rust).collect::<Vec<_>>()
+        };
+        Self {
+            kind: block.kind.to_string(),
+            text: block.text.clone(),
+            level: block.level,
+            bold: block.bold,
+            italic: block.italic,
+            ordered: block.ordered,
+            marker: block.marker.clone(),
+            lines: block.lines.clone(),
+            lang: block.lang.clone(),
+            header: block.header.as_ref().map(&cells),
+            rows: block
+                .rows
+                .as_ref()
+                .map(|rows| rows.iter().map(&cells).collect()),
+            id: block.id.clone(),
+            format: block.format.clone(),
+            bbox: block.bbox.as_ref().map(to_annotation_rect),
         }
     }
 }
@@ -1099,6 +1226,10 @@ fn to_js_result(result: &liteparse::ParseResult, extract_text_metadata: bool) ->
                 .as_ref()
                 .map(|fields| fields.iter().map(FormField::from_rust).collect()),
             structure_tree: p.structure_tree.as_ref().map(StructureTree::from_rust),
+            blocks: p
+                .blocks
+                .as_ref()
+                .map(|blocks| blocks.iter().map(LayoutBlock::from_rust).collect()),
         })
         .collect();
 

@@ -62,6 +62,8 @@ pub(crate) struct JsonPage {
     pub form_fields: Option<Vec<FormField>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub structure_tree: Option<StructureTree>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub blocks: Option<Vec<crate::layout::LayoutBlock>>,
 }
 
 #[derive(Debug, Serialize)]
@@ -160,6 +162,7 @@ pub(crate) fn build_json(pages: &[ParsedPage], extract_text_metadata: bool) -> P
                 annotations: page.annotations.clone(),
                 form_fields: page.form_fields.clone(),
                 structure_tree: page.structure_tree.clone(),
+                blocks: page.blocks.clone(),
             })
             .collect(),
     }
@@ -252,6 +255,7 @@ mod tests {
             annotations: None,
             form_fields: None,
             structure_tree: None,
+            blocks: None,
         }
     }
 

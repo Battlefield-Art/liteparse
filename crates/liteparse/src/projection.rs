@@ -2919,6 +2919,9 @@ pub fn project_pages_to_grid(pages: Vec<Page>) -> Vec<ParsedPage> {
                 annotations: page.annotations,
                 form_fields: page.form_fields,
                 structure_tree: page.structure_tree,
+                // Filled in after classification, which needs the finished
+                // page (and whole-document signals) to run.
+                blocks: None,
             }
         })
         .collect()

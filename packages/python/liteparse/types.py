@@ -60,6 +60,51 @@ class AnnotationRect:
 
 
 @dataclass
+class LayoutCell:
+    """One table cell: its text and the region of the page it was read from.
+
+    ``bbox`` is ``None`` for cells with no ink behind them -- padding inserted
+    to square off a ragged grid, or halves of a merged run split at an
+    estimated position rather than an observed boundary.
+    """
+    text: str
+    bbox: Optional[AnnotationRect] = None
+
+
+@dataclass
+class LayoutBlock:
+    """A classified block of page content, discriminated by ``kind``.
+
+    ``kind`` is one of ``heading``, ``paragraph``, ``list_item``, ``code``,
+    ``table``, ``grid_fallback``, ``rule``, ``figure``. Fields that do not
+    apply to a block's kind are ``None``.
+    """
+    kind: str
+    #: Rendered text for ``heading``, ``paragraph`` and ``list_item``.
+    text: Optional[str] = None
+    #: Heading level (1-6), or list nesting depth for ``list_item``.
+    level: Optional[int] = None
+    bold: bool = False
+    italic: bool = False
+    #: ``list_item`` only; ``marker`` is the marker as it appeared on the page.
+    ordered: Optional[bool] = None
+    marker: Optional[str] = None
+    #: Verbatim source lines for ``code`` and ``grid_fallback``.
+    lines: Optional[List[str]] = None
+    #: Best-effort language hint for ``code``.
+    lang: Optional[str] = None
+    #: ``table`` only.
+    header: Optional[List[LayoutCell]] = None
+    rows: Optional[List[List[LayoutCell]]] = None
+    #: ``figure`` only, matching the ``img_{id}.{format}`` Markdown target.
+    id: Optional[str] = None
+    format: Optional[str] = None
+    #: Region this block occupies, in the same top-left 72-DPI viewport space
+    #: as ``text_items``. The union of every source line that fed the block.
+    bbox: Optional[AnnotationRect] = None
+
+
+@dataclass
 class DocumentAnnotation:
     """One PDF annotation extracted from a page."""
     subtype: str
@@ -142,6 +187,10 @@ class ParsedPage:
     form_fields: Optional[List[FormField]] = None
     #: Present only when parsing with ``extract_structure_tree=True``.
     structure_tree: Optional[StructureTree] = None
+    #: Classified layout blocks in reading order -- the same blocks, in the
+    #: same order, the page's Markdown is built from. Present only when
+    #: parsing with ``extract_blocks=True``.
+    blocks: Optional[List[LayoutBlock]] = None
     #: Union bbox ``(x, y, width, height)`` of the page's top-level content
     #: objects in viewport coords (visible content extent). Present only when
     #: parsing with ``extract_content_bounds=True``; ``None`` otherwise (and
@@ -420,6 +469,7 @@ class LiteParseConfig:
     extract_annotations: bool
     extract_form_fields: bool
     extract_structure_tree: bool
+    extract_blocks: bool
     ocr_failure_fatal: bool
     ocr_hedge_delays_ms: List[int]
     emit_word_boxes: bool

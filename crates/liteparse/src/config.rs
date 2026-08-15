@@ -73,6 +73,16 @@ pub struct LiteParseConfig {
     /// Extract the tagged-PDF logical structure tree. Default `false`.
     #[serde(default)]
     pub extract_structure_tree: bool,
+    /// Emit each page's classified layout blocks (headings, paragraphs, list
+    /// items, tables with per-cell boxes, code, rules, figures) with bounding
+    /// boxes. Default `false`.
+    ///
+    /// This is the same decomposition the Markdown renderer consumes, exposed
+    /// as data. It is independent of `output_format`: blocks are available in
+    /// JSON and text modes too, and enabling it never changes the rendered
+    /// Markdown.
+    #[serde(default)]
+    pub extract_blocks: bool,
     /// Emit each page's `content_bounds`: the union bbox of its top-level
     /// content objects in viewport coords (visible content extent). Default
     /// `false` to keep the default output shape unchanged. Content bounds are
@@ -239,6 +249,7 @@ impl Default for LiteParseConfig {
             extract_annotations: false,
             extract_form_fields: false,
             extract_structure_tree: false,
+            extract_blocks: false,
             extract_content_bounds: false,
             extract_xfa_packets: false,
             extract_document_metadata: false,

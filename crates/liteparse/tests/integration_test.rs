@@ -331,6 +331,66 @@ async fn test_doc_meta_absent_unless_requested() {
 
 #[tokio::test]
 #[serial]
+async fn test_blocks_absent_unless_requested() {
+    let lit = LiteParse::new(LiteParseConfig {
+        ocr_enabled: false,
+        ..LiteParseConfig::default()
+    });
+    let parsed = lit
+        .parse("../../integration_tests_data/sample.pdf")
+        .await
+        .expect("Should be able to parse");
+    assert!(parsed.pages.iter().all(|p| p.blocks.is_none()));
+}
+
+/// Blocks are a parallel view of the same classification the Markdown renderer
+/// uses, so turning them on must not perturb the rendered Markdown, and every
+/// block must report where it came from.
+#[tokio::test]
+#[serial]
+async fn test_extract_blocks_carries_geometry_without_changing_markdown() {
+    let base = LiteParseConfig {
+        ocr_enabled: false,
+        ..LiteParseConfig::default()
+    };
+    let without = LiteParse::new(base.clone())
+        .parse("../../integration_tests_data/sample.pdf")
+        .await
+        .expect("Should be able to parse");
+    let with = LiteParse::new(LiteParseConfig {
+        extract_blocks: true,
+        ..base
+    })
+    .parse("../../integration_tests_data/sample.pdf")
+    .await
+    .expect("Should be able to parse");
+
+    assert_eq!(without.text, with.text, "markdown must be unchanged");
+
+    let blocks = with.pages[0]
+        .blocks
+        .as_ref()
+        .expect("blocks should be populated");
+    assert!(!blocks.is_empty());
+    assert!(
+        blocks.iter().all(|b| b.bbox.is_some()),
+        "every block on a text page should be located"
+    );
+    // Boxes describe real page regions, not placeholders.
+    assert!(blocks.iter().all(|b| {
+        let r = b.bbox.as_ref().unwrap();
+        r.width > 0.0 && r.height > 0.0
+    }));
+    // Blocks come back in reading order (top-to-bottom on a single-column page).
+    let ys: Vec<f32> = blocks.iter().map(|b| b.bbox.as_ref().unwrap().y).collect();
+    assert!(
+        ys.windows(2).all(|w| w[0] <= w[1]),
+        "blocks should be in reading order, got {ys:?}"
+    );
+}
+
+#[tokio::test]
+#[serial]
 async fn test_parse_bytes_pdf_integration() {
     let fixture_path = "../../integration_tests_data/sample.pdf";
     let lit = LiteParse::new(LiteParseConfig {

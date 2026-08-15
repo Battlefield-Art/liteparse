@@ -18,7 +18,7 @@ mod paragraphs;
 mod repetition;
 mod tables;
 
-pub use blocks::{Block, render_blocks};
+pub use blocks::{Block, Cell, PositionedBlock, render_blocks, splice_soft_hyphens};
 pub use classify::classify_page_with_filters;
 pub use headings::{build_heading_map, compute_body_size};
 pub use repetition::{compute_header_footer_set, detect_single_page_chrome};

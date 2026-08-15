@@ -4,6 +4,8 @@ from .parser import LiteParse, search_items
 from .types import (
     AnnotationRect,
     DocumentAnnotation,
+    LayoutBlock,
+    LayoutCell,
     FormField,
     StructureTree,
     StructureTreeElement,
@@ -36,6 +38,8 @@ __all__ = [
     "LiteParse",
     "AnnotationRect",
     "DocumentAnnotation",
+    "LayoutBlock",
+    "LayoutCell",
     "FormField",
     "StructureTree",
     "StructureTreeElement",
