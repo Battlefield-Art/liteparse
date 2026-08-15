@@ -258,9 +258,7 @@ Related: `render_form_fields` draws filled-in field appearances into rendered ra
 
 ## Layout blocks
 
-`extract_blocks` returns the page decomposed into blocks — headings, paragraphs, list items, tables, code, rules, and figures — each with the region of the page it came from.
-
-This is the same classification the Markdown renderer runs on; the flag exposes it as data instead of only as rendered text. Blocks come back in reading order, so the Nth block is the Nth block of that page's Markdown. Enabling it never changes the Markdown output, and blocks are available in every output format, including `--format json` and `--format text`.
+`extract_blocks` returns the page decomposed into blocks — headings, paragraphs, list items, tables, code, rules, and figures — each with the region of the page it came from. This is the same classification the Markdown renderer runs on.
 
 ```bash
 lit parse document.pdf --format json --extract-blocks
@@ -352,17 +350,6 @@ for (const page of pages) {
 
 </TabItem>
 </Tabs>
-
-### Blocks vs. the structure tree
-
-The two look similar and are not interchangeable:
-
-- **`extract_structure_tree`** is the *authored* structure, read from the PDF's tags. It is authoritative where it exists — and absent entirely from untagged PDFs, which is most of them.
-- **`extract_blocks`** is *inferred* structure, derived from font size, weight, indentation, and spacing. It is always available, and it is what Markdown output is built from.
-
-Reach for the structure tree when the file is tagged and you want ground truth; reach for blocks when you need structure from an arbitrary PDF, or you want the coordinates behind a chunk of Markdown.
-
-> Because blocks expose the classifier directly, they also expose its mistakes — a title promoted to the wrong level, or a caption read as a paragraph. Those judgements were always there in the Markdown; blocks just make them legible.
 
 ## Text metadata
 
