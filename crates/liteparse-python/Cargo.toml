@@ -19,7 +19,7 @@ liteparse = { package = "liteparse", version = "2.13.1", path = "../liteparse", 
 pdfium-sys = { package = "liteparse-pdfium-sys", version = "1.5.0", path = "../pdfium-sys" }
 pdfium = { package = "liteparse-pdfium", version = "1.5.0", path = "../pdfium" }
 clap = { version = "4.5.55", features = ["derive"] }
-pyo3 = { version = "0.29", features = ["extension-module"] }
+pyo3 = { version = "0.29", features = ["extension-module", "abi3-py310"] }
 anyhow = "1.0.102"
 image = { version = "0.25", default-features = false, features = ["png"] }
 serde = { version = "1", features = ["derive"] }
