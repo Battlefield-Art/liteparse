@@ -1359,7 +1359,20 @@ fn try_detect_table(lines: &[ProjectedLine], start_idx: usize, floor: usize) -> 
                 .filter(|c| match_track_idx(c, &track_ranges).is_some())
                 .cloned()
                 .collect();
-            if kept.len() == column_count {
+            // Only cells sitting entirely outside the table's x-extent can be
+            // foreign page-column bleed. A cell that lands *between* two
+            // established tracks is in-table content, so discarding it would
+            // silently lose document text — break the run instead and let the
+            // wider row seed its own table.
+            let first_track_x = track_ranges
+                .first()
+                .map(|r| r.0)
+                .unwrap_or(f32::NEG_INFINITY);
+            let extras_all_outside = cells
+                .iter()
+                .filter(|c| match_track_idx(c, &track_ranges).is_none())
+                .all(|c| c.end_x < first_track_x || c.start_x > tracks_right_edge);
+            if kept.len() == column_count && extras_all_outside {
                 cells = kept;
             } else {
                 break;
