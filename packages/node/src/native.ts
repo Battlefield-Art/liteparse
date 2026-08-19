@@ -57,6 +57,8 @@ export interface LiteParseNativeConfig {
   skipDiagonalText?: boolean;
   includeComplexity?: boolean;
   extractVectorGraphics?: boolean;
+  memoryBudgetMb?: number;
+  ocrRasterBudgetMb?: number;
 }
 
 export interface NativeCropBox {

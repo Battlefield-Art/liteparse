@@ -71,8 +71,7 @@ export interface JsLiteParseConfig {
   /**
    * Emit each page's classified layout blocks (headings, paragraphs, list
    * items, tables with per-cell boxes, code, rules, figures) with bounding
-   * boxes as `ParsedPage.blocks`. Default false. Independent of
-   * `outputFormat`; enabling it never changes the rendered markdown.
+   * boxes as `ParsedPage.blocks`. Default false.
    */
   extractBlocks?: boolean
   /** Extract AcroForm widget fields and values. */
@@ -144,6 +143,18 @@ export interface JsLiteParseConfig {
   includeComplexity?: boolean
   /** Expose page-scoped vector path extraction. Default false. */
   extractVectorGraphics?: boolean
+  /**
+   * Approximate memory budget (MiB) for extracted content accumulated
+   * during a parse; the parse rejects with a clear error instead of
+   * growing without bound. 0 disables. Default 4096.
+   */
+  memoryBudgetMb?: number
+  /**
+   * Approximate budget (MiB) for OCR page rasters held in memory at once;
+   * pages render and recognize in rounds sized to this budget. 0 renders
+   * all pages up front. Default 1024.
+   */
+  ocrRasterBudgetMb?: number
 }
 /**
  * A page sub-region as the fraction cropped from each side (top-left origin,

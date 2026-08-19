@@ -48,6 +48,13 @@ pub struct LiteParseConfig {
     ocr_server_headers: Option<HashMap<String, String>>,
     tessdata_path: Option<String>,
     max_pages: Option<usize>,
+    /// Approximate memory budget (MiB) for extracted content accumulated
+    /// during a parse; the parse rejects with a clear error instead of
+    /// growing without bound. 0 disables. Default 4096.
+    memory_budget_mb: Option<usize>,
+    /// Approximate budget (MiB) for OCR page rasters held in memory at once.
+    /// 0 renders all pages up front. Default 1024.
+    ocr_raster_budget_mb: Option<usize>,
     target_pages: Option<String>,
     /// Skip page-level PDF extraction failures and report them in
     /// `ParseResult.pageErrors`. Document-level failures remain fatal.
@@ -143,6 +150,12 @@ impl LiteParseConfig {
         }
         if let Some(v) = self.max_pages {
             cfg.max_pages = v;
+        }
+        if let Some(v) = self.memory_budget_mb {
+            cfg.memory_budget_mb = v;
+        }
+        if let Some(v) = self.ocr_raster_budget_mb {
+            cfg.ocr_raster_budget_mb = v;
         }
         if self.target_pages.is_some() {
             cfg.target_pages = self.target_pages;
@@ -266,6 +279,8 @@ impl LiteParseConfig {
             },
             tessdata_path: cfg.tessdata_path.clone(),
             max_pages: Some(cfg.max_pages),
+            memory_budget_mb: Some(cfg.memory_budget_mb),
+            ocr_raster_budget_mb: Some(cfg.ocr_raster_budget_mb),
             target_pages: cfg.target_pages.clone(),
             continue_on_page_error: Some(cfg.continue_on_page_error),
             extract_screenshots: Some(cfg.extract_screenshots),

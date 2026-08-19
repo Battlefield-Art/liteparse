@@ -1268,6 +1268,10 @@ struct PyLiteParseConfig {
     extract_images: bool,
     #[pyo3(get)]
     extract_vector_graphics: bool,
+    #[pyo3(get)]
+    memory_budget_mb: usize,
+    #[pyo3(get)]
+    ocr_raster_budget_mb: usize,
 }
 
 #[pymethods]
@@ -1335,6 +1339,8 @@ impl PyLiteParseConfig {
             image_output_dir: cfg.image_output_dir.clone(),
             extract_images: cfg.extract_images,
             extract_vector_graphics: cfg.extract_vector_graphics,
+            memory_budget_mb: cfg.memory_budget_mb,
+            ocr_raster_budget_mb: cfg.ocr_raster_budget_mb,
         }
     }
 }
@@ -1462,6 +1468,8 @@ impl LiteParse {
         skip_diagonal_text = None,
         include_complexity = None,
         extract_vector_graphics = None,
+        memory_budget_mb = None,
+        ocr_raster_budget_mb = None,
     ))]
     fn new(
         ocr_language: Option<String>,
@@ -1501,6 +1509,8 @@ impl LiteParse {
         skip_diagonal_text: Option<bool>,
         include_complexity: Option<bool>,
         extract_vector_graphics: Option<bool>,
+        memory_budget_mb: Option<usize>,
+        ocr_raster_budget_mb: Option<usize>,
     ) -> PyResult<Self> {
         let mut cfg = LiteParseConfig::default();
         if let Some(v) = ocr_language {
@@ -1626,6 +1636,12 @@ impl LiteParse {
         }
         if let Some(v) = extract_vector_graphics {
             cfg.extract_vector_graphics = v;
+        }
+        if let Some(v) = memory_budget_mb {
+            cfg.memory_budget_mb = v;
+        }
+        if let Some(v) = ocr_raster_budget_mb {
+            cfg.ocr_raster_budget_mb = v;
         }
 
         let inner = liteparse::parser::LiteParse::new(cfg.clone());

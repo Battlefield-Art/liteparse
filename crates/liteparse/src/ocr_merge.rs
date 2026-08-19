@@ -434,6 +434,30 @@ fn count_columns(region: &Region, total_items: usize) -> usize {
 /// to avoid excessive memory usage.
 pub(crate) const MAX_OCR_RENDER_LONG_EDGE_PX: f32 = 4096.0;
 
+/// Upper-bound estimate of one page's OCR raster output bytes at `dpi`,
+/// mirroring the long-edge DPI clamp applied in [`render_pages_for_ocr`].
+/// Used to size bounded render→recognize rounds before anything is rendered.
+/// Models the retained output buffer only; the render itself transiently
+/// holds one additional 4-bytes-per-pixel bitmap for the page in flight.
+pub(crate) fn estimate_ocr_raster_bytes(
+    page_width_pt: f32,
+    page_height_pt: f32,
+    dpi: f32,
+    grayscale: bool,
+) -> u64 {
+    let long_edge_pt = page_width_pt.max(page_height_pt);
+    let mut eff_dpi = dpi;
+    if long_edge_pt > 0.0 {
+        let max_dpi = MAX_OCR_RENDER_LONG_EDGE_PX * 72.0 / long_edge_pt;
+        if eff_dpi > max_dpi {
+            eff_dpi = max_dpi;
+        }
+    }
+    let width_px = (page_width_pt / 72.0 * eff_dpi).max(1.0) as u64;
+    let height_px = (page_height_pt / 72.0 * eff_dpi).max(1.0) as u64;
+    width_px * height_px * if grayscale { 1 } else { 3 }
+}
+
 pub(crate) fn render_pages_for_ocr(
     document: &Document,
     pages: &[Page],
@@ -441,6 +465,7 @@ pub(crate) fn render_pages_for_ocr(
     grayscale: bool,
     render_form_fields: bool,
     continue_on_page_error: bool,
+    flatten_page_numbers: &std::collections::HashSet<u32>,
 ) -> Result<Vec<RenderedPage>, LiteParseError> {
     let mut rendered = Vec::new();
     // With `render_form_fields`, draw form-field appearances into the OCR
@@ -455,7 +480,22 @@ pub(crate) fn render_pages_for_ocr(
     }
     for (idx, page) in pages.iter().enumerate() {
         let page_render = (|| -> Result<Option<RenderedPage>, LiteParseError> {
-            let page_obj = document.page((page.page_number - 1) as i32)?;
+            let page_index = (page.page_number - 1) as i32;
+            // Text extraction may have flattened THIS page's widget
+            // annotations into page content. When the caller hands us a
+            // freshly reopened document, re-apply the flatten on exactly the
+            // pages extraction flattened, so the raster shows the same
+            // content extraction saw. Never flatten any other page:
+            // flattening hides a page's non-widget annotations (stamps,
+            // highlights, free text) from the raster, losing their text.
+            let page_obj = if flatten_page_numbers.contains(&(page.page_number as u32)) {
+                match document.flatten_form_widgets(page_index)? {
+                    Some(flattened_page) => flattened_page,
+                    None => document.page(page_index)?,
+                }
+            } else {
+                document.page(page_index)?
+            };
             let page_complexity = calculate_page_complexity(page, &page_obj)?;
 
             if !page_complexity.needs_ocr {
@@ -1038,6 +1078,30 @@ fn clean_ocr_table_artifacts(text: &str) -> String {
 mod tests {
     use super::*;
     use crate::types::Rect;
+
+    #[test]
+    fn estimate_ocr_raster_bytes_scales_and_clamps() {
+        // Letter page at 150 dpi: 1275 x 1650 px; RGB is three bytes a pixel,
+        // grayscale one.
+        assert_eq!(
+            estimate_ocr_raster_bytes(612.0, 792.0, 150.0, false),
+            1275 * 1650 * 3
+        );
+        assert_eq!(
+            estimate_ocr_raster_bytes(612.0, 792.0, 150.0, true),
+            1275 * 1650
+        );
+        // A large-format page is clamped to the long-edge pixel cap no matter
+        // how high the requested dpi is.
+        let clamped = estimate_ocr_raster_bytes(2592.0, 1728.0, 600.0, false);
+        let cap = MAX_OCR_RENDER_LONG_EDGE_PX as u64;
+        assert!(clamped <= cap * cap * 3);
+        assert_eq!(
+            clamped,
+            estimate_ocr_raster_bytes(2592.0, 1728.0, 10_000.0, false),
+            "beyond the clamp, higher dpi must not grow the estimate"
+        );
+    }
 
     fn leaf(n: usize) -> Region {
         Region {

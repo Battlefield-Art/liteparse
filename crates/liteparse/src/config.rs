@@ -163,6 +163,47 @@ pub struct LiteParseConfig {
     /// vertical `lines`) in parse results. Default `false`; path objects are
     /// still inspected internally for layout detection when disabled.
     pub extract_vector_graphics: bool,
+    /// Approximate budget, in MiB, for extracted content accumulated in
+    /// memory during a parse (text items, word boxes, embedded image bytes,
+    /// screenshot PNGs). When the running estimate crosses the budget the
+    /// parse fails with [`crate::LiteParseError::MemoryBudget`] instead of
+    /// growing without bound on pathological inputs. `0` disables the check.
+    ///
+    /// The estimate is a lower bound on real usage (it counts payload bytes
+    /// and struct sizes, not allocator or formatting overhead), so treat the
+    /// budget as "reject clearly-oversized documents", not as a precise cap.
+    /// Not counted: vector-graphics paths, structure-tree nodes, annotations
+    /// and form-field records — documents dominated by those can exceed the
+    /// budget's view of memory. The standalone `screenshot()` API is exempt.
+    /// In batch parsing the budget applies per batch, not across the whole
+    /// session — the caller controls cross-batch accumulation.
+    /// Default 4096 MiB. For large documents prefer narrowing
+    /// `target_pages`/`max_pages` or batch parsing over raising the budget.
+    #[serde(default = "default_memory_budget_mb")]
+    pub memory_budget_mb: usize,
+    /// Approximate budget, in MiB, for OCR page rasters held in memory at
+    /// once. Pages are rendered and OCR'd in bounded rounds sized to this
+    /// budget, instead of pre-rendering every text-poor page up front — on a
+    /// long scanned document the up-front strategy holds every raster
+    /// simultaneously. `0` restores the unbounded single-round behavior.
+    /// Default 1024 MiB; at least one page is always rendered per round.
+    ///
+    /// Rounds run serially, so effective OCR concurrency is
+    /// `min(num_workers, pages per round)` — a budget small enough to admit
+    /// fewer pages than `num_workers` reduces OCR throughput. The default
+    /// admits far more pages per round than any realistic worker count.
+    /// Each round also reopens the document once (one document load per
+    /// round; small next to rendering plus recognition for a round's pages).
+    #[serde(default = "default_ocr_raster_budget_mb")]
+    pub ocr_raster_budget_mb: usize,
+}
+
+fn default_memory_budget_mb() -> usize {
+    4096
+}
+
+fn default_ocr_raster_budget_mb() -> usize {
+    1024
 }
 
 /// A page sub-region expressed as the fraction cropped from each side.
@@ -204,6 +245,11 @@ pub enum OutputFormat {
 }
 
 impl LiteParseConfig {
+    /// The extracted-content memory budget in bytes; `0` means disabled.
+    pub fn memory_budget_bytes(&self) -> u64 {
+        self.memory_budget_mb as u64 * 1024 * 1024
+    }
+
     /// Whether embedded-image extraction should run. True when
     /// `extract_images` is set, or when the legacy `ImageMode::Embed` is
     /// configured (`Embed` implies byte extraction for backwards
@@ -263,6 +309,8 @@ impl Default for LiteParseConfig {
             skip_diagonal_text: false,
             include_complexity: false,
             extract_vector_graphics: false,
+            memory_budget_mb: default_memory_budget_mb(),
+            ocr_raster_budget_mb: default_ocr_raster_budget_mb(),
         }
     }
 }

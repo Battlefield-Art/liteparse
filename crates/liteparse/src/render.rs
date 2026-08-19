@@ -47,9 +47,18 @@ pub fn render_pages_to_png(
         detect_rects,
         render_form_fields,
         false,
+        0,
+        0,
     )
 }
 
+/// `memory_budget_bytes` bounds the accumulated PNG payload (`0` disables):
+/// when `charged_bytes` (memory the caller already attributed to this budget,
+/// e.g. extracted text) plus the running PNG total crosses it, the render
+/// fails with [`LiteParseError::MemoryBudget`] instead of holding one PNG per
+/// page on an arbitrarily long document. The error reports the caller's
+/// configured budget and the true combined total.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn render_document_pages(
     document: &pdfium::Document,
     page_numbers: Option<&[u32]>,
@@ -57,6 +66,8 @@ pub(crate) fn render_document_pages(
     detect_rects: bool,
     render_form_fields: bool,
     continue_on_page_error: bool,
+    memory_budget_bytes: u64,
+    charged_bytes: u64,
 ) -> Result<Vec<RenderedPage>, LiteParseError> {
     let page_count = document.page_count() as u32;
     let pages: Vec<u32> = match page_numbers {
@@ -72,6 +83,7 @@ pub(crate) fn render_document_pages(
     }
 
     let mut results = Vec::with_capacity(pages.len());
+    let mut accumulated_png_bytes = 0u64;
     for page_num in pages {
         let page_render = (|| -> Result<RenderedPage, LiteParseError> {
             if page_num < 1 || page_num > page_count {
@@ -114,7 +126,19 @@ pub(crate) fn render_document_pages(
         })();
 
         match page_render {
-            Ok(rendered) => results.push(rendered),
+            Ok(rendered) => {
+                accumulated_png_bytes += rendered.png_bytes.len() as u64;
+                results.push(rendered);
+                if memory_budget_bytes > 0
+                    && charged_bytes + accumulated_png_bytes > memory_budget_bytes
+                {
+                    return Err(LiteParseError::MemoryBudget {
+                        used_mib: (charged_bytes + accumulated_png_bytes) / (1024 * 1024),
+                        budget_mib: memory_budget_bytes / (1024 * 1024),
+                        page_number: page_num,
+                    });
+                }
+            }
             // The page's text is already extracted; a tolerant parse keeps
             // it and just forgoes this page's screenshot.
             Err(error) if continue_on_page_error => eprintln!(

@@ -488,6 +488,14 @@ class LiteParseConfig:
     extract_document_metadata: bool = False
     detect_screenshot_rects: bool = False
     extract_content_bounds: bool = False
+    #: Approximate memory budget (MiB) for extracted content accumulated
+    #: during a parse; the parse raises a clear error instead of growing
+    #: without bound. 0 disables. Default 4096.
+    memory_budget_mb: int = 4096
+    #: Approximate budget (MiB) for OCR page rasters held in memory at once;
+    #: pages render and recognize in bounded rounds. 0 renders all pages up
+    #: front. Default 1024.
+    ocr_raster_budget_mb: int = 1024
 
 
 class ParseError(Exception):

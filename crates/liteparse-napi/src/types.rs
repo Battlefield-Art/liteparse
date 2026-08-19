@@ -119,6 +119,14 @@ pub struct JsLiteParseConfig {
     pub include_complexity: Option<bool>,
     /// Expose page-scoped vector path extraction. Default false.
     pub extract_vector_graphics: Option<bool>,
+    /// Approximate memory budget (MiB) for extracted content accumulated
+    /// during a parse; the parse rejects with a clear error instead of
+    /// growing without bound. 0 disables. Default 4096.
+    pub memory_budget_mb: Option<u32>,
+    /// Approximate budget (MiB) for OCR page rasters held in memory at once;
+    /// pages render and recognize in rounds sized to this budget. 0 renders
+    /// all pages up front. Default 1024.
+    pub ocr_raster_budget_mb: Option<u32>,
 }
 
 /// A page sub-region as the fraction cropped from each side (top-left origin,
@@ -259,6 +267,12 @@ impl JsLiteParseConfig {
         if let Some(v) = self.extract_vector_graphics {
             cfg.extract_vector_graphics = v;
         }
+        if let Some(v) = self.memory_budget_mb {
+            cfg.memory_budget_mb = v as usize;
+        }
+        if let Some(v) = self.ocr_raster_budget_mb {
+            cfg.ocr_raster_budget_mb = v as usize;
+        }
         cfg
     }
 
@@ -323,6 +337,8 @@ impl JsLiteParseConfig {
             skip_diagonal_text: Some(cfg.skip_diagonal_text),
             include_complexity: Some(cfg.include_complexity),
             extract_vector_graphics: Some(cfg.extract_vector_graphics),
+            memory_budget_mb: Some(cfg.memory_budget_mb as u32),
+            ocr_raster_budget_mb: Some(cfg.ocr_raster_budget_mb as u32),
         }
     }
 }

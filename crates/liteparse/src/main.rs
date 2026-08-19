@@ -75,6 +75,18 @@ struct ParseCommand {
     #[arg(long, default_value = "1000")]
     max_pages: usize,
 
+    /// Approximate memory budget (MiB) for extracted content held in memory;
+    /// the parse fails with a clear error instead of growing without bound.
+    /// 0 disables the check.
+    #[arg(long, default_value = "4096")]
+    memory_budget_mb: usize,
+
+    /// Approximate budget (MiB) for OCR page rasters held in memory at once;
+    /// pages are rendered and recognized in rounds sized to this budget.
+    /// 0 renders all pages up front.
+    #[arg(long, default_value = "1024")]
+    ocr_raster_budget_mb: usize,
+
     /// Target pages (e.g., "1-5,10,15-20")
     #[arg(long)]
     target_pages: Option<String>,
@@ -234,6 +246,18 @@ struct BatchParseCommand {
     /// Max pages to parse per file
     #[arg(long, default_value = "1000")]
     max_pages: usize,
+
+    /// Approximate memory budget (MiB) for extracted content held in memory;
+    /// the parse fails with a clear error instead of growing without bound.
+    /// 0 disables the check.
+    #[arg(long, default_value = "4096")]
+    memory_budget_mb: usize,
+
+    /// Approximate budget (MiB) for OCR page rasters held in memory at once;
+    /// pages are rendered and recognized in rounds sized to this budget.
+    /// 0 renders all pages up front.
+    #[arg(long, default_value = "1024")]
+    ocr_raster_budget_mb: usize,
 
     /// Continue after page-level extraction errors and report them in JSON.
     #[arg(long)]
@@ -446,6 +470,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 include_complexity: cmd.complexity,
                 extract_text_metadata: cmd.extract_text_metadata,
                 extract_vector_graphics: cmd.extract_vector_graphics,
+                memory_budget_mb: cmd.memory_budget_mb,
+                ocr_raster_budget_mb: cmd.ocr_raster_budget_mb,
                 ..Default::default()
             };
             if let Some(n) = cmd.num_workers {
@@ -548,6 +574,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 extract_blocks: cmd.extract_blocks,
                 extract_xfa_packets: cmd.extract_xfa_packets,
                 extract_content_bounds: cmd.extract_content_bounds,
+                memory_budget_mb: cmd.memory_budget_mb,
+                ocr_raster_budget_mb: cmd.ocr_raster_budget_mb,
                 ..Default::default()
             };
             if let Some(n) = cmd.num_workers {
@@ -846,6 +874,48 @@ mod tests {
             cli.command,
             Commands::BatchParse(BatchParseCommand {
                 extract_form_fields: true,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn memory_budget_flags_are_available_for_parse_and_batch() {
+        let cli = Cli::try_parse_from([
+            "lit",
+            "parse",
+            "document.pdf",
+            "--memory-budget-mb",
+            "512",
+            "--ocr-raster-budget-mb",
+            "0",
+        ])
+        .unwrap();
+        assert!(matches!(
+            cli.command,
+            Commands::Parse(ParseCommand {
+                memory_budget_mb: 512,
+                ocr_raster_budget_mb: 0,
+                ..
+            })
+        ));
+
+        let cli = Cli::try_parse_from([
+            "lit",
+            "batch-parse",
+            "input",
+            "output",
+            "--memory-budget-mb",
+            "512",
+            "--ocr-raster-budget-mb",
+            "0",
+        ])
+        .unwrap();
+        assert!(matches!(
+            cli.command,
+            Commands::BatchParse(BatchParseCommand {
+                memory_budget_mb: 512,
+                ocr_raster_budget_mb: 0,
                 ..
             })
         ));
