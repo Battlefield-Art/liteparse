@@ -3,7 +3,8 @@
   "version": "2.13.1",
   "description": "Fast, lightweight PDF and document parsing with spatial text extraction",
   "type": "module",
-  "main": "./dist/lib.js",
+  "main": "./dist/lib.cjs",
+  "module": "./dist/lib.js",
   "types": "./dist/lib.d.ts",
   "bin": {
     "lit": "./dist/cli.js",
@@ -12,7 +13,9 @@
   "exports": {
     ".": {
       "types": "./dist/lib.d.ts",
-      "import": "./dist/lib.js"
+      "import": "./dist/lib.js",
+      "require": "./dist/lib.cjs",
+      "default": "./dist/lib.js"
     },
     "./package.json": "./package.json"
   },
@@ -41,7 +44,7 @@
   "scripts": {
     "build:rs": "napi build --cargo-cwd ../../crates/liteparse-napi --platform --release --js false --dts native.d.ts .",
     "build:pdfium": "bash scripts/copy-pdfium.sh .",
-    "build:ts": "tsc",
+    "build:ts": "tsc && tsc -p tsconfig.cjs.json && node scripts/build-cjs.mjs",
     "build": "npm run build:rs && npm run build:pdfium && npm run build:ts",
     "prepublishOnly": "npm run build"
   },
