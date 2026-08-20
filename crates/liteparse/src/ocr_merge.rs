@@ -438,17 +438,6 @@ pub(crate) const MAX_OCR_RENDER_LONG_EDGE_PX: f32 = 4096.0;
 /// `max_rasters` of them have been rendered (`0` means no limit). Returns the
 /// rasters plus the index to resume scanning from, so a caller can process a
 /// long document in bounded rounds.
-///
-/// The bound is on rasters produced, not pages scanned, because pages that
-/// need OCR can be sparse: bounding a round by page span would hand the OCR
-/// engine only the OCR-needing pages that happen to fall in that span, which
-/// on a mostly-native-text document starves the engine's worker pool and
-/// serializes recognition that could have run concurrently. Skipping a page
-/// costs a complexity check, not a render, so scanning ahead to fill a round
-/// is cheap.
-///
-/// `RenderedPage::idx` indexes `pages` absolutely, so the caller merges
-/// against the whole slice regardless of where the round started.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn render_pages_for_ocr(
     document: &Document,
