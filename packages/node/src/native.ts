@@ -4,37 +4,11 @@
 // provides the .node binary. During development: `napi build` places it alongside package.json.
 
 import { createRequire } from "node:module";
-import { join, dirname, resolve } from "node:path";
+import { join, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
 
-declare const require: NodeRequire | undefined;
-declare const __dirname: string | undefined;
-
-function getRuntimeContext(): { require: NodeRequire; dirname: string } {
-  if (typeof require === "function" && typeof __dirname === "string") {
-    return { require, dirname: __dirname };
-  }
-
-  const entryPoint = process.argv[1]
-    ? resolve(process.argv[1])
-    : join(process.cwd(), "package.json");
-  const entryRequire = createRequire(entryPoint);
-  let packageDir = process.cwd();
-
-  try {
-    packageDir = dirname(
-      entryRequire.resolve("@llamaindex/liteparse/package.json"),
-    );
-  } catch {
-    // Development builds may not be installed as a package yet.
-  }
-
-  return {
-    require: createRequire(join(packageDir, "package.json")),
-    dirname: packageDir,
-  };
-}
-
-const runtime = getRuntimeContext();
+const require = createRequire(import.meta.url);
+const __dirname = dirname(fileURLToPath(import.meta.url));
 
 interface NativeBindings {
   LiteParse: new (config?: LiteParseNativeConfig) => LiteParseNative;
@@ -430,7 +404,7 @@ function loadNative(): NativeBindings {
     const pkg = triples[key];
     if (pkg) {
       try {
-        return runtime.require(pkg);
+        return require(pkg);
       } catch {
         // Not installed, try next
       }
@@ -439,11 +413,7 @@ function loadNative(): NativeBindings {
 
   // Fallback: local .node file (development builds)
   // Try several paths since __dirname may be dist/ or dist/src/
-  const searchDirs = [
-    runtime.dirname,
-    join(runtime.dirname, ".."),
-    join(runtime.dirname, "..", ".."),
-  ];
+  const searchDirs = [__dirname, join(__dirname, ".."), join(__dirname, "..", "..")];
   // Try full triple names (e.g. liteparse.linux-x64-gnu.node) and simple name
   const fileNames = [
     ...candidates.map((c) => `liteparse.${c}.node`),
@@ -453,7 +423,7 @@ function loadNative(): NativeBindings {
   for (const dir of searchDirs) {
     for (const fileName of fileNames) {
       try {
-        return runtime.require(join(dir, fileName));
+        return require(join(dir, fileName));
       } catch {
         // try next
       }

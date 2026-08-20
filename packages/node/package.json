@@ -6,16 +6,21 @@
   "main": "./dist/lib.cjs",
   "module": "./dist/lib.js",
   "types": "./dist/lib.d.ts",
+  "sideEffects": false,
   "bin": {
     "lit": "./dist/cli.js",
     "liteparse": "./dist/cli.js"
   },
   "exports": {
     ".": {
-      "types": "./dist/lib.d.ts",
-      "import": "./dist/lib.js",
-      "require": "./dist/lib.cjs",
-      "default": "./dist/lib.js"
+      "import": {
+        "types": "./dist/lib.d.ts",
+        "default": "./dist/lib.js"
+      },
+      "require": {
+        "types": "./dist/lib.d.cts",
+        "default": "./dist/lib.cjs"
+      }
     },
     "./package.json": "./package.json"
   },
@@ -44,8 +49,9 @@
   "scripts": {
     "build:rs": "napi build --cargo-cwd ../../crates/liteparse-napi --platform --release --js false --dts native.d.ts .",
     "build:pdfium": "bash scripts/copy-pdfium.sh .",
-    "build:ts": "tsc && tsc -p tsconfig.cjs.json && node scripts/build-cjs.mjs",
+    "build:ts": "node scripts/clean-dist.mjs && tsc --noEmit && tsup",
     "build": "npm run build:rs && npm run build:pdfium && npm run build:ts",
+    "test": "node --test tests/",
     "prepublishOnly": "npm run build"
   },
   "dependencies": {
@@ -54,6 +60,7 @@
   "devDependencies": {
     "@napi-rs/cli": "^2.18.4",
     "@types/node": "^22.0.0",
+    "tsup": "^8.5.0",
     "typescript": "~5.9.2"
   },
   "optionalDependencies": {
