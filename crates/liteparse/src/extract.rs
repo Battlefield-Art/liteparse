@@ -81,10 +81,6 @@ pub(crate) struct ExtractedPages {
     /// pages — flattening a page extraction never touched hides that page's
     /// non-widget annotations from the raster.
     pub flattened_page_numbers: Vec<u32>,
-    /// Running estimate of the bytes held by `pages` + `images`, as counted
-    /// against `ExtractionOutputOptions::memory_budget_bytes`. Lets callers
-    /// charge later allocations (e.g. screenshot PNGs) to the same budget.
-    pub approx_extracted_bytes: u64,
 }
 
 /// Same as `extract_pages_from_document` but optionally also renders every
@@ -107,7 +103,6 @@ pub(crate) fn extract_pages_and_images(
     let mut image_error_count = 0u32;
     let mut flattened_form_widgets = false;
     let mut flattened_page_numbers: Vec<u32> = Vec::new();
-    let mut approx_extracted_bytes = 0u64;
     // One FFI call keeps the per-page annotation walk off the hot path for
     // every document without an AcroForm catalog, which is nearly all of them.
     let document_has_form = document.form_type() != 0;
@@ -148,10 +143,6 @@ pub(crate) fn extract_pages_and_images(
             &mut page_errors,
         )? {
             Some(extraction) => {
-                approx_extracted_bytes += approx_page_bytes(&extraction.page);
-                for image in &extraction.images {
-                    approx_extracted_bytes += approx_image_bytes(image);
-                }
                 if extraction.flattened_form_widgets {
                     flattened_page_numbers.push(page_number);
                 }
@@ -159,15 +150,6 @@ pub(crate) fn extract_pages_and_images(
                 images.extend(extraction.images);
                 image_error_count += extraction.image_error_count;
                 flattened_form_widgets |= extraction.flattened_form_widgets;
-                if output_options.memory_budget_bytes > 0
-                    && approx_extracted_bytes > output_options.memory_budget_bytes
-                {
-                    return Err(LiteParseError::MemoryBudget {
-                        used_mib: approx_extracted_bytes / (1024 * 1024),
-                        budget_mib: output_options.memory_budget_bytes / (1024 * 1024),
-                        page_number,
-                    });
-                }
             }
             // A failed page's cached renders must not seed dedup for later
             // pages: a hit would emit `duplicate_of` pointing at an image id
@@ -183,7 +165,6 @@ pub(crate) fn extract_pages_and_images(
         image_error_count,
         flattened_form_widgets,
         flattened_page_numbers,
-        approx_extracted_bytes,
     })
 }
 
@@ -468,52 +449,6 @@ pub(crate) struct ExtractionOutputOptions {
     pub extract_form_fields: bool,
     pub extract_structure_tree: bool,
     pub emit_word_boxes: bool,
-    /// Approximate byte budget for accumulated pages + images; `0` disables
-    /// the check. See `LiteParseConfig::memory_budget_mb`.
-    pub memory_budget_bytes: u64,
-}
-
-/// Approximate resident bytes of one extracted page: struct sizes plus the
-/// owned payloads that dominate on text-dense documents (item text, per-word
-/// boxes, char codes, string fields). Deliberately a lower bound — allocator
-/// slack and later formatting copies are not counted — so the budget check
-/// errs toward admitting.
-pub(crate) fn approx_page_bytes(page: &LitePage) -> u64 {
-    let mut bytes = std::mem::size_of::<LitePage>() as u64;
-    for item in &page.text_items {
-        bytes += std::mem::size_of::<TextItem>() as u64;
-        bytes += item.text.len() as u64;
-        bytes += (item.char_codes.len() * std::mem::size_of::<u32>()) as u64;
-        bytes += item.font_name.as_deref().map_or(0, str::len) as u64;
-        bytes += item.fill_color.as_deref().map_or(0, str::len) as u64;
-        bytes += item.stroke_color.as_deref().map_or(0, str::len) as u64;
-        bytes += item.link.as_deref().map_or(0, str::len) as u64;
-        for word in &item.words {
-            bytes += std::mem::size_of::<WordBox>() as u64 + word.text.len() as u64;
-        }
-    }
-    bytes += (page.graphics.len() * std::mem::size_of::<GraphicPrimitive>()) as u64;
-    if let Some(vector_graphics) = &page.vector_graphics {
-        bytes += (vector_graphics.shapes.len() * std::mem::size_of::<VectorShape>()) as u64;
-        bytes += (vector_graphics.lines.len() * std::mem::size_of::<VectorLine>()) as u64;
-    }
-    bytes += (page.struct_nodes.len() * std::mem::size_of::<StructNode>()) as u64;
-    bytes
-}
-
-/// Approximate resident bytes of one extracted image. Duplicate entries share
-/// the canonical image's `Arc` buffer, so only the first occurrence pays for
-/// the pixel bytes.
-fn approx_image_bytes(image: &ExtractedImage) -> u64 {
-    let payload = if image.duplicate_of.is_none() {
-        image.bytes.len() as u64
-    } else {
-        0
-    };
-    std::mem::size_of::<ExtractedImage>() as u64
-        + payload
-        + image.id.len() as u64
-        + image.name.len() as u64
 }
 
 fn document_annotation(annotation: &pdfium::PdfAnnotation) -> DocumentAnnotation {
@@ -3739,61 +3674,5 @@ mod tests {
                 .map(|c| c.id.as_str()),
             Some("p3_1")
         );
-    }
-
-    #[test]
-    fn memory_budget_rejects_oversized_extraction() {
-        let bytes = rotated_text_pdf();
-
-        // The document borrows the input buffer, so the input must outlive it.
-        let input = PdfInput::Bytes(bytes);
-
-        // A budget of one byte trips on the first extracted page.
-        let error = {
-            let lib = Library::init();
-            let document = load_document_from_input(&lib, &input, None).unwrap();
-            match extract_pages_and_images(
-                &document,
-                None,
-                usize::MAX,
-                false,
-                None,
-                ExtractionOutputOptions {
-                    memory_budget_bytes: 1,
-                    ..Default::default()
-                },
-            ) {
-                Ok(_) => panic!("expected the one-byte budget to reject the extraction"),
-                Err(error) => error,
-            }
-        };
-        match error {
-            LiteParseError::MemoryBudget {
-                budget_mib,
-                page_number,
-                ..
-            } => {
-                assert_eq!(budget_mib, 0); // one byte rounds down to 0 MiB
-                assert_eq!(page_number, 1);
-            }
-            other => panic!("expected MemoryBudget, got: {other}"),
-        }
-
-        // Budget 0 disables the check, and the running estimate is reported.
-        let lib = Library::init();
-        let document = load_document_from_input(&lib, &input, None).unwrap();
-        let extracted = extract_pages_and_images(
-            &document,
-            None,
-            usize::MAX,
-            false,
-            None,
-            ExtractionOutputOptions::default(),
-        )
-        .unwrap();
-        assert_eq!(extracted.pages.len(), 2);
-        assert!(extracted.approx_extracted_bytes > 0);
-        let per_page_sum: u64 = extracted.pages.iter().map(approx_page_bytes).sum();
-        assert_eq!(extracted.approx_extracted_bytes, per_page_sum);
     }
 }

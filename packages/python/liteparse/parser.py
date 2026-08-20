@@ -489,8 +489,6 @@ class LiteParse:
         skip_diagonal_text: Optional[bool] = None,
         include_complexity: Optional[bool] = None,
         extract_vector_graphics: Optional[bool] = None,
-        memory_budget_mb: Optional[int] = None,
-        ocr_raster_budget_mb: Optional[int] = None,
     ):
         """
         Initialize LiteParse parser.
@@ -570,14 +568,6 @@ class LiteParse:
                 pass.
             extract_vector_graphics: Expose page-scoped vector shapes and
                 merged horizontal/vertical line segments. Default False.
-            memory_budget_mb: Approximate memory budget (MiB) for extracted
-                content accumulated during a parse; the parse fails with a
-                clear error instead of growing without bound. 0 disables.
-                Default 4096.
-            ocr_raster_budget_mb: Approximate budget (MiB) for OCR page
-                rasters held in memory at once; pages render and recognize
-                in bounded rounds. 0 renders all pages up front. Default
-                1024.
         """
         kwargs = {}
         if ocr_enabled is not None:
@@ -654,10 +644,6 @@ class LiteParse:
             kwargs["include_complexity"] = include_complexity
         if extract_vector_graphics is not None:
             kwargs["extract_vector_graphics"] = extract_vector_graphics
-        if memory_budget_mb is not None:
-            kwargs["memory_budget_mb"] = memory_budget_mb
-        if ocr_raster_budget_mb is not None:
-            kwargs["ocr_raster_budget_mb"] = ocr_raster_budget_mb
 
         self._native = _NativeLiteParse(**kwargs)
 
@@ -897,8 +883,6 @@ class LiteParse:
             extract_document_metadata=cfg.extract_document_metadata,
             extract_content_bounds=cfg.extract_content_bounds,
             detect_screenshot_rects=cfg.detect_screenshot_rects,
-            memory_budget_mb=cfg.memory_budget_mb,
-            ocr_raster_budget_mb=cfg.ocr_raster_budget_mb,
         )
 
     def __repr__(self) -> str:

@@ -119,19 +119,6 @@ export interface LiteParseConfig {
   includeComplexity: boolean;
   /** Expose page-scoped vector shapes and merged H/V line segments. Default false. */
   extractVectorGraphics: boolean;
-  /**
-   * Approximate memory budget (MiB) for extracted content accumulated during
-   * a parse (text items, word boxes, embedded images, screenshot PNGs). The
-   * parse rejects with a clear error instead of growing without bound on
-   * pathological inputs. 0 disables the check. Default 4096.
-   */
-  memoryBudgetMb: number;
-  /**
-   * Approximate budget (MiB) for OCR page rasters held in memory at once;
-   * pages render and recognize in bounded rounds sized to this budget.
-   * 0 renders all pages up front. Default 1024.
-   */
-  ocrRasterBudgetMb: number;
 }
 
 /**
@@ -659,8 +646,6 @@ export class LiteParse {
       skipDiagonalText: userConfig.skipDiagonalText,
       includeComplexity: userConfig.includeComplexity,
       extractVectorGraphics: userConfig.extractVectorGraphics,
-      memoryBudgetMb: userConfig.memoryBudgetMb,
-      ocrRasterBudgetMb: userConfig.ocrRasterBudgetMb,
     };
 
     this._native = new native.LiteParse(nativeConfig);
@@ -705,8 +690,6 @@ export class LiteParse {
       skipDiagonalText: resolved.skipDiagonalText ?? false,
       includeComplexity: resolved.includeComplexity ?? false,
       extractVectorGraphics: resolved.extractVectorGraphics ?? false,
-      memoryBudgetMb: resolved.memoryBudgetMb ?? 4096,
-      ocrRasterBudgetMb: resolved.ocrRasterBudgetMb ?? 1024,
     };
   }
 

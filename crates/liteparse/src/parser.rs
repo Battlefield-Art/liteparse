@@ -381,7 +381,6 @@ impl LiteParse {
                 self.glyph_resolver.as_deref(),
                 extract::ExtractionOutputOptions {
                     continue_on_page_error: self.config.continue_on_page_error,
-                    memory_budget_bytes: self.config.memory_budget_bytes(),
                     ..Default::default()
                 },
             )?
@@ -668,7 +667,6 @@ impl LiteParse {
                     extract_annotations: self.config.extract_annotations,
                     extract_form_fields: self.config.extract_form_fields,
                     extract_structure_tree: self.config.extract_structure_tree,
-                    memory_budget_bytes: self.config.memory_budget_bytes(),
                 },
             )?;
             let extract::ExtractedPages {
@@ -678,7 +676,6 @@ impl LiteParse {
                 image_error_count,
                 flattened_form_widgets,
                 flattened_page_numbers,
-                approx_extracted_bytes,
             } = extracted;
             // Reopening the input costs a full parse, so it is confined to the
             // one consumer that genuinely needs live widget annotations: the
@@ -733,10 +730,6 @@ impl LiteParse {
                     .iter()
                     .map(|page| page.page_number as u32)
                     .collect::<Vec<_>>();
-                // Screenshot PNGs accumulate alongside the extracted pages,
-                // so they draw down the same memory budget; the extraction
-                // bytes already spent are passed as pre-charged so the error
-                // reports the configured budget and the true running total.
                 render::render_document_pages(
                     analysis_document,
                     Some(&page_numbers),
@@ -744,8 +737,6 @@ impl LiteParse {
                     self.config.detect_screenshot_rects,
                     self.config.render_form_fields,
                     self.config.continue_on_page_error,
-                    self.config.memory_budget_bytes(),
-                    approx_extracted_bytes,
                 )?
                 .into_iter()
                 .map(|page| ScreenshotResult {
@@ -788,16 +779,33 @@ impl LiteParse {
         // OCR pass, in bounded render→recognize rounds. Rendering every
         // text-poor page before recognizing any of them holds one raster per
         // page simultaneously, which grows without bound on long scanned
-        // documents. Instead, render at most a raster budget's worth of
-        // pages under a short-lived PDFium lock, recognize and merge that
-        // round, release the rasters, and repeat. Each round reopens the
-        // document; that costs one document load per round, which is small
-        // next to rendering plus OCR for dozens of pages. The reopen is also
-        // a new failure point: a path input whose file becomes unreadable
+        // documents: at 200 dpi a letter page raster is ~11 MB, so a
+        // 500-page scan held ~5.6 GB before the first recognition started.
+        // Instead, render one round of rasters under a short-lived PDFium
+        // lock, recognize and merge that round, release the rasters, and
+        // repeat.
+        //
+        // A round is `num_workers` *rasters* — not pages. That is the most
+        // rasters that can be under recognition at once, since
+        // `ocr_and_merge_rendered` gates concurrency on a `num_workers`
+        // semaphore, so any raster beyond that count is parked memory rather
+        // than throughput. Bounding by rasters instead of by page span is
+        // what keeps the engine fed: OCR-needing pages are often sparse in a
+        // mostly-native-text document, so a page-span round would hand the
+        // engine only the few such pages inside that span and serialize work
+        // that could have overlapped. `render_pages_for_ocr` therefore scans
+        // ahead — skipping a page costs a complexity check, not a render —
+        // until it has a full round.
+        //
+        // Each round reopens the document, costing one document load per
+        // round; with rounds sized by rasters there is exactly one round per
+        // `num_workers` pages that actually need OCR, so a document with
+        // little OCR work pays at most one reopen. The reopen is also a new
+        // failure point: a path input whose file becomes unreadable
         // mid-parse now fails at OCR time (after extraction succeeded)
         // rather than never reloading.
         if let Some(engine) = ocr_engine {
-            let raster_budget_bytes = self.config.ocr_raster_budget_mb as u64 * 1024 * 1024;
+            let round_rasters = self.config.num_workers.max(1);
             // Extraction may have flattened SOME pages' form widgets into
             // page content in its (now dropped) document instance; re-apply
             // per round on exactly those pages so the rasters match what
@@ -812,19 +820,14 @@ impl LiteParse {
             let ocr_input = repaired_input.as_ref().unwrap_or(validated_input);
             let mut round_start = 0usize;
             while round_start < pages.len() {
-                let round_end = ocr_round_end(
-                    &pages,
-                    round_start,
-                    raster_budget_bytes,
-                    self.config.dpi,
-                    ocr_grayscale,
-                );
-                let rendered = {
+                let (rendered, next_start) = {
                     let lib = Library::init();
                     let document = extract::load_document_from_input(&lib, ocr_input, password)?;
                     ocr_merge::render_pages_for_ocr(
                         &document,
-                        &pages[round_start..round_end],
+                        &pages,
+                        round_start,
+                        round_rasters,
                         self.config.dpi,
                         ocr_grayscale,
                         self.config.render_form_fields,
@@ -834,8 +837,16 @@ impl LiteParse {
                     // `lib` drops here, releasing the PDFium lock before the
                     // engine's async recognition below.
                 };
+                round_start = next_start;
+                if rendered.is_empty() {
+                    // The scan reached the end without finding another page
+                    // that needs OCR.
+                    continue;
+                }
+                // `RenderedPage::idx` is absolute, so the whole slice is
+                // passed regardless of where this round started.
                 ocr_merge::ocr_and_merge_rendered(
-                    &mut pages[round_start..round_end],
+                    &mut pages,
                     rendered,
                     engine.clone(),
                     &self.config.ocr_language,
@@ -843,7 +854,6 @@ impl LiteParse {
                     self.config.ocr_failure_fatal,
                 )
                 .await?;
-                round_start = round_end;
             }
         }
         let t_ocr = web_time::Instant::now();
@@ -974,9 +984,6 @@ impl LiteParse {
     /// LibreOffice/ImageMagick on the system). Plain-text formats cannot be
     /// rendered and return a clear error.
     #[cfg(not(target_arch = "wasm32"))]
-    /// Note: this standalone API does not apply `memory_budget_mb`; all
-    /// requested pages' PNGs are held in memory. Bound the page selection
-    /// for very long documents.
     pub async fn screenshot(
         &self,
         input: &str,
@@ -1083,36 +1090,6 @@ impl LiteParse {
             batch_size,
         })
     }
-}
-
-/// End index (exclusive) of the next OCR render round starting at
-/// `round_start`: admits pages until their estimated raster bytes would cross
-/// `raster_budget_bytes`. Always admits at least one page, so a budget
-/// smaller than a single raster still makes progress; a budget of `0` means
-/// unbounded (one round covering every remaining page).
-fn ocr_round_end(
-    pages: &[Page],
-    round_start: usize,
-    raster_budget_bytes: u64,
-    dpi: f32,
-    grayscale: bool,
-) -> usize {
-    let mut round_end = round_start;
-    let mut estimated_bytes = 0u64;
-    while round_end < pages.len() {
-        let page = &pages[round_end];
-        let page_bytes =
-            ocr_merge::estimate_ocr_raster_bytes(page.page_width, page.page_height, dpi, grayscale);
-        if round_end > round_start
-            && raster_budget_bytes > 0
-            && estimated_bytes + page_bytes > raster_budget_bytes
-        {
-            break;
-        }
-        estimated_bytes += page_bytes;
-        round_end += 1;
-    }
-    round_end
 }
 
 /// A document opened once and parsed in bounded page batches.
@@ -1422,40 +1399,5 @@ mod tests {
             !std::path::Path::new(&converted_path).exists(),
             "dropping the session should clean up the converted temp PDF"
         );
-    }
-
-    fn blank_page(page_number: usize, width: f32, height: f32) -> Page {
-        Page {
-            page_number,
-            page_width: width,
-            page_height: height,
-            content_bounds: None,
-            text_items: vec![],
-            graphics: vec![],
-            vector_graphics: None,
-            struct_nodes: vec![],
-            image_refs: vec![],
-            annotations: None,
-            form_fields: None,
-            structure_tree: None,
-        }
-    }
-
-    #[test]
-    fn ocr_round_end_zero_budget_admits_every_page() {
-        let pages: Vec<Page> = (1..=5).map(|n| blank_page(n, 612.0, 792.0)).collect();
-        assert_eq!(ocr_round_end(&pages, 0, 0, 150.0, false), 5);
-    }
-
-    #[test]
-    fn ocr_round_end_splits_on_budget_and_always_progresses() {
-        let pages: Vec<Page> = (1..=4).map(|n| blank_page(n, 612.0, 792.0)).collect();
-        let one_page = ocr_merge::estimate_ocr_raster_bytes(612.0, 792.0, 150.0, false);
-        // Budget of two pages: rounds of two.
-        assert_eq!(ocr_round_end(&pages, 0, one_page * 2, 150.0, false), 2);
-        assert_eq!(ocr_round_end(&pages, 2, one_page * 2, 150.0, false), 4);
-        // Budget below a single raster still admits one page per round.
-        assert_eq!(ocr_round_end(&pages, 0, 1, 150.0, false), 1);
-        assert_eq!(ocr_round_end(&pages, 1, 1, 150.0, false), 2);
     }
 }

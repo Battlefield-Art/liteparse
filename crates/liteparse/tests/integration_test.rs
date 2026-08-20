@@ -741,20 +741,21 @@ impl liteparse::ocr::OcrEngine for ProbeEngine {
     }
 }
 
-/// OCR runs in bounded render→recognize rounds when `ocr_raster_budget_mb`
-/// is smaller than the document's rasters. Every page must be recognized
-/// exactly once, each page's OCR text must land on the page whose raster
-/// produced it (distinct page sizes make a misroute visible), and a budget
-/// of one page per round must actually serialize recognition (peak
-/// concurrent recognitions = 1), which fails if the round loop is removed.
+/// OCR runs in render→recognize rounds of `num_workers` pages. Whatever the
+/// round size, every page must be recognized exactly once and each page's OCR
+/// text must land on the page whose raster produced it — distinct page sizes
+/// make a misroute visible, which is the failure mode the per-round document
+/// reopen and form-widget re-flatten could introduce. `num_workers: 1` forces
+/// one page per round (four rounds over four pages) and must also serialize
+/// recognition; `num_workers: 4` covers the whole document in a single round
+/// with overlapping recognition. Both must agree page-for-page.
 #[tokio::test]
 #[serial]
 async fn test_ocr_rounds_cover_every_page_once() {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    // Distinct sizes; at 150 dpi the letter page's raster alone (~6 MB RGB)
-    // exceeds a 1 MiB budget, so every round holds exactly one page.
+    // Distinct sizes so a raster delivered to the wrong page is detectable.
     let page_sizes: [(u32, u32); 4] = [(612, 792), (400, 500), (300, 300), (500, 900)];
     let expected_texts: Vec<String> = page_sizes
         .iter()
@@ -768,7 +769,7 @@ async fn test_ocr_rounds_cover_every_page_once() {
         })
         .collect();
 
-    let run = |budget_mb: usize| {
+    let run = |num_workers: usize| {
         let calls = Arc::new(AtomicUsize::new(0));
         let peak = Arc::new(AtomicUsize::new(0));
         let engine = ProbeEngine {
@@ -778,8 +779,7 @@ async fn test_ocr_rounds_cover_every_page_once() {
         };
         let parser = LiteParse::new(LiteParseConfig {
             ocr_enabled: true,
-            ocr_raster_budget_mb: budget_mb,
-            num_workers: 4,
+            num_workers,
             dpi: 150.0,
             quiet: true,
             ..Default::default()
@@ -788,13 +788,29 @@ async fn test_ocr_rounds_cover_every_page_once() {
         (parser, calls, peak)
     };
 
-    // Bounded rounds: one page per round, recognition fully serialized.
+    let assert_pages_carry_own_rasters = |result: &liteparse::ParseResult, label: &str| {
+        assert_eq!(result.pages.len(), page_sizes.len(), "{label}: page count");
+        for (page, expected) in result.pages.iter().zip(&expected_texts) {
+            let text: String = page
+                .text_items
+                .iter()
+                .map(|item| item.text.as_str())
+                .collect();
+            assert!(
+                text.contains(expected.as_str()),
+                "{label}: page {} carries {text:?}, expected {expected:?} — OCR text landed on the wrong page",
+                page.page_number
+            );
+        }
+    };
+
+    // One page per round: four rounds, recognition fully serialized.
     let (parser, calls, peak) = run(1);
-    let result = parser
+    let serialized = parser
         .parse_input(PdfInput::Bytes(blank_pdf(&page_sizes)))
         .await
-        .expect("bounded-round OCR parse should succeed");
-    assert_eq!(result.pages.len(), page_sizes.len());
+        .expect("single-page-round OCR parse should succeed");
+    assert_pages_carry_own_rasters(&serialized, "rounds of 1");
     assert_eq!(
         calls.load(Ordering::SeqCst),
         page_sizes.len(),
@@ -803,32 +819,76 @@ async fn test_ocr_rounds_cover_every_page_once() {
     assert_eq!(
         peak.load(Ordering::SeqCst),
         1,
-        "a one-page round budget must serialize recognition; >1 means the round loop is not bounding"
+        "num_workers=1 must serialize recognition"
     );
-    for (page, expected) in result.pages.iter().zip(&expected_texts) {
-        let text: String = page
-            .text_items
-            .iter()
-            .map(|item| item.text.as_str())
-            .collect();
-        assert!(
-            text.contains(expected.as_str()),
-            "page {} carries {text:?}, expected {expected:?} — OCR text landed on the wrong page",
-            page.page_number
-        );
-    }
 
-    // Legacy escape hatch: budget 0 renders everything in one round and
-    // recognition overlaps up to num_workers.
-    let (parser, calls, peak) = run(0);
-    let result = parser
+    // Round wide enough for the whole document: one round, overlapping
+    // recognition, identical routing.
+    let (parser, calls, peak) = run(4);
+    let overlapped = parser
         .parse_input(PdfInput::Bytes(blank_pdf(&page_sizes)))
         .await
-        .expect("legacy single-round OCR parse should succeed");
-    assert_eq!(result.pages.len(), page_sizes.len());
+        .expect("single-round OCR parse should succeed");
+    assert_pages_carry_own_rasters(&overlapped, "rounds of 4");
     assert_eq!(calls.load(Ordering::SeqCst), page_sizes.len());
     assert!(
         peak.load(Ordering::SeqCst) > 1,
-        "budget 0 must restore the single-round path with overlapping recognition"
+        "num_workers=4 over 4 pages must overlap recognition within the round"
+    );
+}
+
+/// A round is bounded by rasters rendered, not by page span, so OCR-needing
+/// pages that are sparsely scattered through a mostly-native-text document
+/// still fill a round and recognize concurrently.
+///
+/// This guards a real regression: bounding the round by page span instead
+/// made each round contain only the OCR-needing pages that happened to fall
+/// inside its span — often one or two — which starved the worker pool and
+/// serialized recognition. On this document that was a 2.4x wall-clock loss
+/// at realistic OCR latency, with no test failing.
+#[tokio::test]
+#[serial]
+async fn test_ocr_rounds_fill_across_sparse_pages() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let calls = Arc::new(AtomicUsize::new(0));
+    let peak = Arc::new(AtomicUsize::new(0));
+    let parser = LiteParse::new(LiteParseConfig {
+        ocr_enabled: true,
+        num_workers: 8,
+        dpi: 72.0, // Small rasters: this test is about scheduling, not pixels.
+        quiet: true,
+        ..Default::default()
+    })
+    .with_ocr_engine(std::sync::Arc::new(ProbeEngine {
+        calls: calls.clone(),
+        in_flight: Arc::new(AtomicUsize::new(0)),
+        peak_in_flight: peak.clone(),
+    }));
+
+    let result = parser
+        .parse("../../demo/docs/apple-10k-2024.pdf")
+        .await
+        .expect("should parse the 10-K with OCR enabled");
+
+    let recognized = calls.load(Ordering::SeqCst);
+    assert!(
+        recognized > 8,
+        "expected the fixture to need OCR on more than one round's worth of pages, got {recognized}"
+    );
+    assert!(
+        result.pages.len() > recognized,
+        "fixture should be mostly native text, so OCR pages ({recognized}) must be sparse \
+         among its {} pages",
+        result.pages.len()
+    );
+    // The scan-ahead must gather a full round even though the OCR-needing
+    // pages are interleaved with native-text pages it skips.
+    assert_eq!(
+        peak.load(Ordering::SeqCst),
+        8,
+        "rounds must fill to num_workers across skipped pages; a lower peak means \
+         rounds are being cut short by page span"
     );
 }

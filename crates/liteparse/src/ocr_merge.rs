@@ -434,39 +434,33 @@ fn count_columns(region: &Region, total_items: usize) -> usize {
 /// to avoid excessive memory usage.
 pub(crate) const MAX_OCR_RENDER_LONG_EDGE_PX: f32 = 4096.0;
 
-/// Upper-bound estimate of one page's OCR raster output bytes at `dpi`,
-/// mirroring the long-edge DPI clamp applied in [`render_pages_for_ocr`].
-/// Used to size bounded render→recognize rounds before anything is rendered.
-/// Models the retained output buffer only; the render itself transiently
-/// holds one additional 4-bytes-per-pixel bitmap for the page in flight.
-pub(crate) fn estimate_ocr_raster_bytes(
-    page_width_pt: f32,
-    page_height_pt: f32,
-    dpi: f32,
-    grayscale: bool,
-) -> u64 {
-    let long_edge_pt = page_width_pt.max(page_height_pt);
-    let mut eff_dpi = dpi;
-    if long_edge_pt > 0.0 {
-        let max_dpi = MAX_OCR_RENDER_LONG_EDGE_PX * 72.0 / long_edge_pt;
-        if eff_dpi > max_dpi {
-            eff_dpi = max_dpi;
-        }
-    }
-    let width_px = (page_width_pt / 72.0 * eff_dpi).max(1.0) as u64;
-    let height_px = (page_height_pt / 72.0 * eff_dpi).max(1.0) as u64;
-    width_px * height_px * if grayscale { 1 } else { 3 }
-}
-
+/// Render the pages in `pages[start..]` that need OCR, stopping once
+/// `max_rasters` of them have been rendered (`0` means no limit). Returns the
+/// rasters plus the index to resume scanning from, so a caller can process a
+/// long document in bounded rounds.
+///
+/// The bound is on rasters produced, not pages scanned, because pages that
+/// need OCR can be sparse: bounding a round by page span would hand the OCR
+/// engine only the OCR-needing pages that happen to fall in that span, which
+/// on a mostly-native-text document starves the engine's worker pool and
+/// serializes recognition that could have run concurrently. Skipping a page
+/// costs a complexity check, not a render, so scanning ahead to fill a round
+/// is cheap.
+///
+/// `RenderedPage::idx` indexes `pages` absolutely, so the caller merges
+/// against the whole slice regardless of where the round started.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn render_pages_for_ocr(
     document: &Document,
     pages: &[Page],
+    start: usize,
+    max_rasters: usize,
     dpi: f32,
     grayscale: bool,
     render_form_fields: bool,
     continue_on_page_error: bool,
     flatten_page_numbers: &std::collections::HashSet<u32>,
-) -> Result<Vec<RenderedPage>, LiteParseError> {
+) -> Result<(Vec<RenderedPage>, usize), LiteParseError> {
     let mut rendered = Vec::new();
     // With `render_form_fields`, draw form-field appearances into the OCR
     // raster so filled-in form values are visible to the OCR engine (matches
@@ -478,7 +472,8 @@ pub(crate) fn render_pages_for_ocr(
     if let Some(form) = form.as_ref() {
         form.run_document_actions();
     }
-    for (idx, page) in pages.iter().enumerate() {
+    let mut next_start = pages.len();
+    for (idx, page) in pages.iter().enumerate().skip(start) {
         let page_render = (|| -> Result<Option<RenderedPage>, LiteParseError> {
             let page_index = (page.page_number - 1) as i32;
             // Text extraction may have flattened THIS page's widget
@@ -531,7 +526,13 @@ pub(crate) fn render_pages_for_ocr(
             }))
         })();
         match page_render {
-            Ok(Some(render)) => rendered.push(render),
+            Ok(Some(render)) => {
+                rendered.push(render);
+                if max_rasters > 0 && rendered.len() >= max_rasters {
+                    next_start = idx + 1;
+                    break;
+                }
+            }
             Ok(None) => {}
             // The page already extracted successfully, so a tolerant parse
             // keeps its native text and only forgoes the OCR enrichment.
@@ -542,7 +543,7 @@ pub(crate) fn render_pages_for_ocr(
             Err(error) => return Err(error),
         }
     }
-    Ok(rendered)
+    Ok((rendered, next_start))
 }
 
 /// Run OCR on pre-rendered page bitmaps and merge results into `pages`.
@@ -1078,30 +1079,6 @@ fn clean_ocr_table_artifacts(text: &str) -> String {
 mod tests {
     use super::*;
     use crate::types::Rect;
-
-    #[test]
-    fn estimate_ocr_raster_bytes_scales_and_clamps() {
-        // Letter page at 150 dpi: 1275 x 1650 px; RGB is three bytes a pixel,
-        // grayscale one.
-        assert_eq!(
-            estimate_ocr_raster_bytes(612.0, 792.0, 150.0, false),
-            1275 * 1650 * 3
-        );
-        assert_eq!(
-            estimate_ocr_raster_bytes(612.0, 792.0, 150.0, true),
-            1275 * 1650
-        );
-        // A large-format page is clamped to the long-edge pixel cap no matter
-        // how high the requested dpi is.
-        let clamped = estimate_ocr_raster_bytes(2592.0, 1728.0, 600.0, false);
-        let cap = MAX_OCR_RENDER_LONG_EDGE_PX as u64;
-        assert!(clamped <= cap * cap * 3);
-        assert_eq!(
-            clamped,
-            estimate_ocr_raster_bytes(2592.0, 1728.0, 10_000.0, false),
-            "beyond the clamp, higher dpi must not grow the estimate"
-        );
-    }
 
     fn leaf(n: usize) -> Region {
         Region {
