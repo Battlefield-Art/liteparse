@@ -8,11 +8,11 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createRequire } from "node:module";
-import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 const PACKAGE_NAME = "@llamaindex/liteparse";
 const packageDir = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -87,27 +87,60 @@ test("CJS: require by package name loads the native module and parses", async ()
 // Loading from a working directory outside the package, via an entry script
 // that cannot resolve the package by name, is the case that catches a loader
 // which infers its location from process.cwd() or process.argv[1] instead.
-for (const [label, entry] of [
-  ["ESM", `import(${JSON.stringify(join(packageDir, "dist", "lib.js"))})`],
-  ["CJS", `Promise.resolve(require(${JSON.stringify(join(packageDir, "dist", "lib.cjs"))}))`],
+//
+// `import()` takes a URL specifier, so the ESM path must go through
+// pathToFileURL — on Windows a bare `C:\...` path is read as an unknown
+// protocol. `require()` takes a plain filesystem path and must not be a URL.
+// POSIX tolerates a bare absolute path in `import()`, so the specifier shape is
+// asserted below rather than left to fail on Windows only.
+for (const [label, specifier, load] of [
+  [
+    "ESM",
+    pathToFileURL(join(packageDir, "dist", "lib.js")).href,
+    (s) => `import(${s})`,
+  ],
+  [
+    "CJS",
+    join(packageDir, "dist", "lib.cjs"),
+    (s) => `Promise.resolve(require(${s}))`,
+  ],
 ]) {
   test(`${label}: loads by absolute path from an unrelated working directory`, () => {
+    if (label === "ESM") {
+      assert.ok(
+        specifier.startsWith("file://"),
+        "dynamic import() needs a file:// URL to work on Windows",
+      );
+    } else {
+      assert.ok(
+        !specifier.startsWith("file:"),
+        "require() takes a filesystem path, not a URL",
+      );
+    }
+
     const script = `
-      ${entry}.then(async ({ LiteParse }) => {
+      ${load(JSON.stringify(specifier))}.then(async ({ LiteParse }) => {
         const r = await new LiteParse({ ocrEnabled: false, quiet: true })
           .parse(${JSON.stringify(samplePdf)});
         if (!r.pages.length) throw new Error("no pages parsed");
         console.log("OK");
       }).catch((e) => { console.error(e.message); process.exit(1); });
     `;
-    const scriptPath = join(mkdtempSync(join(tmpdir(), "liteparse-")), "entry.cjs");
+    // The temp dir has no package.json, so `.cjs` is CommonJS either way, and
+    // the package is unresolvable by name from here — which is the point.
+    const scriptDir = mkdtempSync(join(tmpdir(), "liteparse-"));
+    const scriptPath = join(scriptDir, "entry.cjs");
     writeFileSync(scriptPath, script);
 
-    const output = execFileSync(process.execPath, [scriptPath], {
-      cwd: dirname(scriptPath),
-      encoding: "utf8",
-    });
-    assert.match(output, /OK/);
+    try {
+      const output = execFileSync(process.execPath, [scriptPath], {
+        cwd: scriptDir,
+        encoding: "utf8",
+      });
+      assert.match(output, /OK/);
+    } finally {
+      rmSync(scriptDir, { recursive: true, force: true });
+    }
   });
 }
 
