@@ -776,34 +776,6 @@ impl LiteParse {
         let mut pages = pages;
         let t1 = web_time::Instant::now();
 
-        // OCR pass, in bounded render→recognize rounds. Rendering every
-        // text-poor page before recognizing any of them holds one raster per
-        // page simultaneously, which grows without bound on long scanned
-        // documents: at 200 dpi a letter page raster is ~11 MB, so a
-        // 500-page scan held ~5.6 GB before the first recognition started.
-        // Instead, render one round of rasters under a short-lived PDFium
-        // lock, recognize and merge that round, release the rasters, and
-        // repeat.
-        //
-        // A round is `num_workers` *rasters* — not pages. That is the most
-        // rasters that can be under recognition at once, since
-        // `ocr_and_merge_rendered` gates concurrency on a `num_workers`
-        // semaphore, so any raster beyond that count is parked memory rather
-        // than throughput. Bounding by rasters instead of by page span is
-        // what keeps the engine fed: OCR-needing pages are often sparse in a
-        // mostly-native-text document, so a page-span round would hand the
-        // engine only the few such pages inside that span and serialize work
-        // that could have overlapped. `render_pages_for_ocr` therefore scans
-        // ahead — skipping a page costs a complexity check, not a render —
-        // until it has a full round.
-        //
-        // Each round reopens the document, costing one document load per
-        // round; with rounds sized by rasters there is exactly one round per
-        // `num_workers` pages that actually need OCR, so a document with
-        // little OCR work pays at most one reopen. The reopen is also a new
-        // failure point: a path input whose file becomes unreadable
-        // mid-parse now fails at OCR time (after extraction succeeded)
-        // rather than never reloading.
         if let Some(engine) = ocr_engine {
             let round_rasters = self.config.num_workers.max(1);
             // Extraction may have flattened SOME pages' form widgets into
