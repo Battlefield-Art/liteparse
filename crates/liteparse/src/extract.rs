@@ -75,6 +75,12 @@ pub(crate) struct ExtractedPages {
     /// mutates the open PDFium document, so a caller that still needs the
     /// original widget annotations must reopen the input.
     pub flattened_form_widgets: bool,
+    /// The page numbers extraction actually flattened. Flattening is a
+    /// per-page decision, so any consumer reproducing it on a reopened
+    /// document (e.g. OCR raster rendering) must apply it to exactly these
+    /// pages — flattening a page extraction never touched hides that page's
+    /// non-widget annotations from the raster.
+    pub flattened_page_numbers: Vec<u32>,
 }
 
 /// Same as `extract_pages_from_document` but optionally also renders every
@@ -96,6 +102,7 @@ pub(crate) fn extract_pages_and_images(
     let mut image_cache = ImageCache::default();
     let mut image_error_count = 0u32;
     let mut flattened_form_widgets = false;
+    let mut flattened_page_numbers: Vec<u32> = Vec::new();
     // One FFI call keeps the per-page annotation walk off the hot path for
     // every document without an AcroForm catalog, which is nearly all of them.
     let document_has_form = document.form_type() != 0;
@@ -136,6 +143,9 @@ pub(crate) fn extract_pages_and_images(
             &mut page_errors,
         )? {
             Some(extraction) => {
+                if extraction.flattened_form_widgets {
+                    flattened_page_numbers.push(page_number);
+                }
                 pages.push(extraction.page);
                 images.extend(extraction.images);
                 image_error_count += extraction.image_error_count;
@@ -154,6 +164,7 @@ pub(crate) fn extract_pages_and_images(
         images,
         image_error_count,
         flattened_form_widgets,
+        flattened_page_numbers,
     })
 }
 

@@ -434,14 +434,22 @@ fn count_columns(region: &Region, total_items: usize) -> usize {
 /// to avoid excessive memory usage.
 pub(crate) const MAX_OCR_RENDER_LONG_EDGE_PX: f32 = 4096.0;
 
+/// Render the pages in `pages[start..]` that need OCR, stopping once
+/// `max_rasters` of them have been rendered (`0` means no limit). Returns the
+/// rasters plus the index to resume scanning from, so a caller can process a
+/// long document in bounded rounds.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn render_pages_for_ocr(
     document: &Document,
     pages: &[Page],
+    start: usize,
+    max_rasters: usize,
     dpi: f32,
     grayscale: bool,
     render_form_fields: bool,
     continue_on_page_error: bool,
-) -> Result<Vec<RenderedPage>, LiteParseError> {
+    flatten_page_numbers: &std::collections::HashSet<u32>,
+) -> Result<(Vec<RenderedPage>, usize), LiteParseError> {
     let mut rendered = Vec::new();
     // With `render_form_fields`, draw form-field appearances into the OCR
     // raster so filled-in form values are visible to the OCR engine (matches
@@ -453,9 +461,25 @@ pub(crate) fn render_pages_for_ocr(
     if let Some(form) = form.as_ref() {
         form.run_document_actions();
     }
-    for (idx, page) in pages.iter().enumerate() {
+    let mut next_start = pages.len();
+    for (idx, page) in pages.iter().enumerate().skip(start) {
         let page_render = (|| -> Result<Option<RenderedPage>, LiteParseError> {
-            let page_obj = document.page((page.page_number - 1) as i32)?;
+            let page_index = (page.page_number - 1) as i32;
+            // Text extraction may have flattened THIS page's widget
+            // annotations into page content. When the caller hands us a
+            // freshly reopened document, re-apply the flatten on exactly the
+            // pages extraction flattened, so the raster shows the same
+            // content extraction saw. Never flatten any other page:
+            // flattening hides a page's non-widget annotations (stamps,
+            // highlights, free text) from the raster, losing their text.
+            let page_obj = if flatten_page_numbers.contains(&(page.page_number as u32)) {
+                match document.flatten_form_widgets(page_index)? {
+                    Some(flattened_page) => flattened_page,
+                    None => document.page(page_index)?,
+                }
+            } else {
+                document.page(page_index)?
+            };
             let page_complexity = calculate_page_complexity(page, &page_obj)?;
 
             if !page_complexity.needs_ocr {
@@ -491,7 +515,13 @@ pub(crate) fn render_pages_for_ocr(
             }))
         })();
         match page_render {
-            Ok(Some(render)) => rendered.push(render),
+            Ok(Some(render)) => {
+                rendered.push(render);
+                if max_rasters > 0 && rendered.len() >= max_rasters {
+                    next_start = idx + 1;
+                    break;
+                }
+            }
             Ok(None) => {}
             // The page already extracted successfully, so a tolerant parse
             // keeps its native text and only forgoes the OCR enrichment.
@@ -502,7 +532,7 @@ pub(crate) fn render_pages_for_ocr(
             Err(error) => return Err(error),
         }
     }
-    Ok(rendered)
+    Ok((rendered, next_start))
 }
 
 /// Run OCR on pre-rendered page bitmaps and merge results into `pages`.
