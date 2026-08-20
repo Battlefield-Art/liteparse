@@ -47,16 +47,6 @@ header/footer removal and image deduplication are batch-local and the output
 can differ from `parse()`. Prefer `parse()` unless the size of the
 materialized result is the problem.
 
-Two budgets also bound a parse from the inside, whichever entry point you
-use. `memoryBudgetMb` (default 4096, `0` disables) caps the extracted
-content a single parse may accumulate; crossing it fails with a clear
-`memory budget exceeded` error instead of growing without bound, and in
-batch parsing it applies per batch. `ocrRasterBudgetMb` (default 1024,
-`0` restores the previous render-everything-first behavior) makes OCR
-render and recognize pages in bounded rounds, so peak raster memory tracks
-the budget instead of the document length; each round reopens the document
-once, and effective OCR concurrency is `min(numWorkers, pages per round)`.
-
 ## Markdown Output
 
 LiteParse can render documents directly to Markdown including headings, tables, lists,
@@ -108,8 +98,6 @@ const parser = new LiteParse({
   password: undefined,           // Password for protected documents
   quiet: false,                  // Suppress progress output
   numWorkers: 4,                 // Concurrent OCR workers
-  memoryBudgetMb: 4096,          // Reject parses whose extracted content exceeds this (0 disables)
-  ocrRasterBudgetMb: 1024,       // OCR page rasters held in memory at once (0 = render all up front)
 });
 ```
 
