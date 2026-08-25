@@ -26,6 +26,18 @@ for (const page of result.pages) {
 }
 ```
 
+CommonJS is supported as well:
+
+```javascript
+const { LiteParse } = require('@llamaindex/liteparse');
+
+(async () => {
+  const parser = new LiteParse();
+  const result = await parser.parse('document.pdf');
+  console.log(result.text);
+})();
+```
+
 ### Bounded-memory parsing
 
 For documents with many text items, consume page batches without retaining
