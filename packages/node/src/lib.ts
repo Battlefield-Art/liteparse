@@ -11,6 +11,9 @@ import {
   type NativePageComplexityStats,
   type NativeScreenshotResult,
 } from "./native.js";
+import { WorkerPool, ParseTimeoutError } from "./pool.js";
+
+export { ParseTimeoutError };
 
 // ---------------------------------------------------------------------------
 // Public types — match the existing TypeScript API
@@ -19,6 +22,23 @@ import {
 export type LiteParseInput = string | Buffer | Uint8Array;
 export type OutputFormat = "json" | "text" | "markdown";
 export type ImageMode = "off" | "placeholder" | "embed";
+
+/** Options for pool mode: parsing in persistent, killable worker processes. */
+export interface PoolOptions {
+  /**
+   * Route `parse()` through a pool of this many persistent worker processes.
+   * Call `close()` when done (an idle pool never keeps the event loop alive, 
+   * but explicit shutdown frees workers immediately).
+   */
+  poolSize?: number;
+  /**
+   * Hard per-parse deadline in milliseconds. Requires `poolSize`.
+   * The pool enforces the deadline by SIGKILLing the worker. On expiry
+   * the parse rejects with {@link ParseTimeoutError} (naming the document)
+   * and a fresh worker replaces the killed one.
+   */
+  parseTimeoutMs?: number;
+}
 
 export interface LiteParseConfig {
   ocrLanguage: string;
@@ -606,8 +626,9 @@ export interface LayoutComplexityStats {
 export class LiteParse {
   private _native: LiteParseNative;
   private _config: LiteParseConfig;
+  private _pool: WorkerPool | null = null;
 
-  constructor(userConfig: Partial<LiteParseConfig> = {}) {
+  constructor(userConfig: Partial<LiteParseConfig> & PoolOptions = {}) {
     const nativeConfig: LiteParseNativeConfig = {
       ocrLanguage: userConfig.ocrLanguage,
       ocrEnabled: userConfig.ocrEnabled,
@@ -649,6 +670,22 @@ export class LiteParse {
     };
 
     this._native = new native.LiteParse(nativeConfig);
+
+    if (
+      userConfig.parseTimeoutMs !== undefined &&
+      userConfig.poolSize === undefined
+    ) {
+      throw new Error(
+        "parseTimeoutMs requires poolSize"
+      );
+    }
+    if (userConfig.poolSize !== undefined) {
+      this._pool = new WorkerPool(
+        nativeConfig as unknown as Record<string, unknown>,
+        userConfig.poolSize,
+        userConfig.parseTimeoutMs,
+      );
+    }
 
     // Read back the resolved config from the native side
     const resolved = this._native.config;
@@ -697,8 +734,37 @@ export class LiteParse {
     // Convert Uint8Array to Buffer for the native side
     const nativeInput =
       typeof input === "string" ? input : Buffer.from(input);
+    if (this._pool !== null) {
+      const source =
+        typeof nativeInput === "string"
+          ? nativeInput
+          : `<${nativeInput.byteLength} bytes>`;
+      return this._pool.parse(nativeInput, source);
+    }
     const result: NativeParseResult = await this._native.parse(nativeInput);
     return toParseResult(result);
+  }
+
+  /**
+   * Resolves once every pool worker is initialized. No-op without `poolSize`.
+   *
+   * Optional: the first parse on each worker waits for its init anyway. Call
+   * this before latency-sensitive traffic to avoid paying worker startup on
+   * the first request.
+   */
+  async warmUp(): Promise<void> {
+    if (this._pool !== null) await this._pool.warmUp();
+  }
+
+  /**
+   * Shut down pool workers, if pool mode is enabled. Idempotent.
+   *
+   * Without `poolSize` this is a no-op. An idle pool never keeps the event
+   * loop alive and workers exit when the parent does, so forgetting to call
+   * this leaks nothing past process exit.
+   */
+  close(): void {
+    if (this._pool !== null) this._pool.close();
   }
 
   /**
@@ -839,7 +905,8 @@ function toComplexity(s: NativePageComplexityStats): PageComplexityStats {
   };
 }
 
-function toParseResult(result: NativeParseResult): ParseResult {
+/** @internal Exported for pool-worker.ts only; not public API. */
+export function toParseResult(result: NativeParseResult): ParseResult {
   return {
     totalPages: result.totalPages,
     pages: result.pages.map(toPage),

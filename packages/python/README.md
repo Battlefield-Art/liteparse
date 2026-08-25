@@ -114,6 +114,26 @@ with open("document.pdf", "rb") as f:
 print(result.text)
 ```
 
+## Worker Pool and Hard Timeouts
+
+PDFium is not thread-safe, so in-process parses serialize on a process-global
+lock. For high-throughput services, or cases where you need to enforce a timeout,
+run parses in a pool of persistent worker processes instead:
+
+```python
+from liteparse import LiteParse, ParseTimeoutError
+
+parser = LiteParse(pool_size=4, parse_timeout=15)
+parser.warm_up()  # optional: pre-initialize workers (~60ms total)
+
+try:
+    result = parser.parse("document.pdf")
+except ParseTimeoutError as e:
+    print(f"killed rogue document: {e.source} (deadline {e.timeout}s)")
+
+parser.close()  # or use `with LiteParse(...) as parser:`
+```
+
 ## Screenshots
 
 Generate PNG screenshots of document pages:

@@ -162,6 +162,32 @@ const result = await parser.parse(pdfBytes);
 console.log(result.text);
 ```
 
+## Worker Pool and Hard Timeouts
+
+PDFium is not thread-safe, so all parses inside one process serialize on a
+process-global lock — even `Promise.all` over multiple `parse()` calls runs
+them one at a time.
+
+For high-throughput services, or for cases when you need to enforce a
+runtime timeout, run parses in a pool of persistent worker processes instead:
+
+```typescript
+import { LiteParse, ParseTimeoutError } from '@llamaindex/liteparse';
+
+const parser = new LiteParse({ poolSize: 4, parseTimeoutMs: 15_000 });
+await parser.warmUp(); // optional: pre-initialize workers (~45ms total)
+
+try {
+  const result = await parser.parse('document.pdf');
+} catch (e) {
+  if (e instanceof ParseTimeoutError) {
+    console.warn(`killed rogue document: ${e.source} (deadline ${e.timeoutMs}ms)`);
+  }
+}
+
+parser.close(); // frees workers immediately; an idle pool never blocks exit
+```
+
 ## Screenshots
 
 Generate PNG screenshots of document pages:
