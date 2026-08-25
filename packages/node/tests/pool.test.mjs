@@ -152,6 +152,21 @@ test("close() shuts down the pool", { skip: !existsSync(SAMPLE_PDF) }, async () 
   pooled.close(); // idempotent
 });
 
+test("CJS build resolves and forks the pool worker", { skip: !existsSync(SAMPLE_PDF) }, async () => {
+  // The worker file is located relative to import.meta.url, which tsup shims
+  // in the .cjs bundle — this guards the fork path for require() consumers.
+  const { createRequire } = await import("node:module");
+  const require = createRequire(import.meta.url);
+  const cjs = require("../dist/lib.cjs");
+  const pooled = new cjs.LiteParse({ ...CFG, poolSize: 1, parseTimeoutMs: 30_000 });
+  try {
+    const result = await pooled.parse(SAMPLE_PDF);
+    assert.ok(result.text.length > 0);
+  } finally {
+    pooled.close();
+  }
+});
+
 test("pooled parses run concurrently", { skip: !existsSync(SAMPLE_PDF) }, async () => {
   const pooled = new LiteParse({ ...CFG, poolSize: 4 });
   try {

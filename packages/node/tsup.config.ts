@@ -30,4 +30,15 @@ export default defineConfig([
     format: ["esm"],
     dts: false,
   },
+  {
+    ...shared,
+    // Pool worker: forked as a standalone child process by pool.ts, never
+    // imported, so it needs its own entry (nothing else would emit the file)
+    // and ESM suffices — fork() runs an ESM entry regardless of whether the
+    // parent loaded lib.js or lib.cjs. pool.ts resolves the file relative to
+    // import.meta.url, which `shims` keeps working from the .cjs build.
+    entry: { "pool-worker": "src/pool-worker.ts" },
+    format: ["esm"],
+    dts: false,
+  },
 ]);
