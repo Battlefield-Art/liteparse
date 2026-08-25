@@ -43,6 +43,7 @@
     "build:pdfium": "bash scripts/copy-pdfium.sh .",
     "build:ts": "tsc",
     "build": "npm run build:rs && npm run build:pdfium && npm run build:ts",
+    "test": "npm run build:ts && node --test tests/",
     "prepublishOnly": "npm run build"
   },
   "dependencies": {

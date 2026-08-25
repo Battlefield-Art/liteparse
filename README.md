@@ -43,6 +43,7 @@ hard stuff so your models see clean, structured data and markdown.
 - **Markdown Output**: Structured Markdown with headings, tables, lists, images, and links — great for feeding LLMs and RAG pipelines
 - **Bounding Boxes**: Precise text positioning information
 - **Multi-language**: Use from Rust, Node.js/TypeScript, Python, or the browser (WASM)
+- **Worker Pool Mode** (Python & Node.js): Parse in persistent worker processes for true parallelism (PDFium otherwise serializes concurrent parses) and hard per-parse timeouts — rogue documents are killed, identified by name, and never stall the pipeline
 - **Multi-platform**: Linux, macOS (Intel/ARM), Windows
 
 ```mermaid

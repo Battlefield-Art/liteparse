@@ -493,3 +493,23 @@ class LiteParseConfig:
 class ParseError(Exception):
     """Exception raised when parsing fails."""
     pass
+
+
+class ParseTimeoutError(ParseError):
+    """A pooled parse exceeded ``parse_timeout`` and its worker was killed.
+
+    Only raised in pool mode (``LiteParse(pool_size=...)``), where the
+    deadline is enforced by killing the worker process — the timed-out parse
+    is guaranteed dead, not still running in the background.
+
+    Attributes:
+        source: The document that timed out — the file path, or
+            ``"<N bytes>"`` for byte inputs. Log this to identify the
+            documents that stall your pipeline.
+        timeout: The deadline that was exceeded, in seconds.
+    """
+
+    def __init__(self, message: str, *, source: str, timeout: float):
+        super().__init__(message)
+        self.source = source
+        self.timeout = timeout

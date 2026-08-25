@@ -114,6 +114,40 @@ with open("document.pdf", "rb") as f:
 print(result.text)
 ```
 
+## Worker Pool and Hard Timeouts
+
+PDFium is not thread-safe, so in-process parses serialize on a process-global
+lock — and a parse stuck inside a single PDFium call cannot be interrupted
+from within the process. For high-throughput services, run parses in a pool
+of persistent worker processes instead:
+
+```python
+from liteparse import LiteParse, ParseTimeoutError
+
+parser = LiteParse(pool_size=4, parse_timeout=15)
+parser.warm_up()  # optional: pre-initialize workers (~60ms total)
+
+try:
+    result = parser.parse("document.pdf")
+except ParseTimeoutError as e:
+    print(f"killed rogue document: {e.source} (deadline {e.timeout}s)")
+
+parser.close()  # or use `with LiteParse(...) as parser:`
+```
+
+- **Real parallelism**: each worker has its own PDFium instance, so `pool_size`
+  parses run genuinely concurrently instead of queueing on the global lock.
+- **Hard kill-switch**: `parse_timeout` is enforced by killing the worker
+  process (and spawning a replacement), so a timed-out parse is guaranteed
+  dead — no wedged thread holding a lock. The exception names the document,
+  so rogue files identify themselves in your logs.
+- **Low overhead**: workers are spawned once and reused. Per-parse overhead is
+  IPC serialization only (sub-millisecond for small documents).
+
+`parse_timeout` requires `pool_size` by design: an in-process deadline cannot
+actually stop a parse, and LiteParse won't offer a timeout it can't enforce.
+Only `parse()` is routed through the pool; other methods run in-process.
+
 ## Screenshots
 
 Generate PNG screenshots of document pages:

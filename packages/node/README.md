@@ -150,6 +150,47 @@ const result = await parser.parse(pdfBytes);
 console.log(result.text);
 ```
 
+## Worker Pool and Hard Timeouts
+
+PDFium is not thread-safe, so all parses inside one process serialize on a
+process-global lock — even `Promise.all` over multiple `parse()` calls runs
+them one at a time. And a parse stuck inside a single PDFium call cannot be
+interrupted from within the process. For high-throughput services, run parses
+in a pool of persistent worker processes instead:
+
+```typescript
+import { LiteParse, ParseTimeoutError } from '@llamaindex/liteparse';
+
+const parser = new LiteParse({ poolSize: 4, parseTimeoutMs: 15_000 });
+await parser.warmUp(); // optional: pre-initialize workers (~45ms total)
+
+try {
+  const result = await parser.parse('document.pdf');
+} catch (e) {
+  if (e instanceof ParseTimeoutError) {
+    console.warn(`killed rogue document: ${e.source} (deadline ${e.timeoutMs}ms)`);
+  }
+}
+
+parser.close(); // frees workers immediately; an idle pool never blocks exit
+```
+
+- **Real parallelism**: each worker has its own PDFium instance, so `poolSize`
+  parses run genuinely concurrently — `Promise.all` becomes actually parallel
+  with no caller changes.
+- **Hard kill-switch**: `parseTimeoutMs` is enforced by SIGKILLing the worker
+  process (and forking a replacement), so a timed-out parse is guaranteed
+  dead — no wedged thread holding a lock. The error names the document, so
+  rogue files identify themselves in your logs.
+- **Low overhead**: workers are forked once and reused. Per-parse overhead is
+  IPC serialization only (sub-millisecond for small documents).
+
+`parseTimeoutMs` requires `poolSize` by design: an in-process deadline cannot
+actually stop a parse, and LiteParse won't offer a timeout it can't enforce.
+(`worker_threads` wouldn't help either — workers share the process and its
+PDFium lock, and `terminate()` cannot preempt native code.) Only `parse()` is
+routed through the pool; other methods run in-process.
+
 ## Screenshots
 
 Generate PNG screenshots of document pages:
