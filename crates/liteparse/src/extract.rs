@@ -13,6 +13,15 @@ use pdfium::{
     SegmentKind, TextPage,
 };
 
+/// Dedup spatial-grid cell size bounds (pt). The cell tracks the typical item
+/// footprint so a cell holds O(1) non-overlapping items.
+const DEDUP_MIN_CELL_SIZE: f32 = 8.0;
+const DEDUP_MAX_CELL_SIZE: f32 = 256.0;
+/// Items spanning more grid cells than this (full-page watermarks,
+/// row-spanning leaders) skip the grid and go to a side list that every item
+/// checks against.
+const DEDUP_MAX_CELLS_PER_ITEM: i64 = 64;
+
 /// Open a PDF from path or bytes with an optional password.
 ///
 /// The returned [`Document`] borrows from the provided [`Library`], which
@@ -1780,123 +1789,201 @@ fn extract_page_text_items(
 
 /// Remove duplicate text items: exact text matches with any bbox overlap,
 /// and near-duplicates (different text) with high bbox overlap (>50% area).
+/// Pair predicate for [`dedup_overlapping_items`]: should the *earlier* item
+/// `i` be dropped in favor of the later item `j` (later = painted on top)?
+///
+/// Callers must already have filtered out diagonal items (see the comment in
+/// `dedup_overlapping_items`).
+fn dedup_pair_drops_earlier(items: &[TextItem], i: usize, j: usize, debug: bool) -> bool {
+    let a = &items[i];
+    let b = &items[j];
+
+    // Compute intersection area
+    let ix_left = a.x.max(b.x);
+    let ix_right = (a.x + a.width).min(b.x + b.width);
+    let iy_top = a.y.max(b.y);
+    let iy_bottom = (a.y + a.height).min(b.y + b.height);
+
+    if ix_left >= ix_right || iy_top >= iy_bottom {
+        return false; // no overlap
+    }
+
+    let intersection = (ix_right - ix_left) * (iy_bottom - iy_top);
+    let area_a = a.width * a.height;
+    let area_b = b.width * b.height;
+    let smaller_area = area_a.min(area_b);
+
+    // Strong overlap: >50% of the smaller item is covered. Guards against
+    // dropping legitimate repeats of the same word elsewhere on the page —
+    // true duplicate stamps overlap essentially 100%, unrelated repeats
+    // share at most a sliver of slack loose-box area.
+    if !(smaller_area > 0.0 && intersection / smaller_area > 0.5) {
+        return false;
+    }
+
+    if a.text == b.text {
+        if debug {
+            eprintln!(
+                "[extract-debug] DEDUP exact-match drop i={i} text='{}' at ({:.1},{:.1} {}x{}) in favor of j={j} at ({:.1},{:.1} {}x{}) overlap_ratio={:.2}",
+                a.text,
+                a.x,
+                a.y,
+                a.width,
+                a.height,
+                b.x,
+                b.y,
+                b.width,
+                b.height,
+                intersection / smaller_area
+            );
+        }
+        return true;
+    }
+
+    // Different text but strong overlap: likely overpainted text layers
+    // (e.g. old/new branding); keep the later one (on top in paint order).
+    // Skip when sizes differ wildly (area ratio > 5x) — a small cell value
+    // inside a row-spanning dotted leader is separate content, not a layer.
+    let larger_area = area_a.max(area_b);
+    if larger_area / smaller_area > 5.0 {
+        if debug {
+            eprintln!(
+                "[extract-debug] DEDUP skip (area ratio {:.1}x) i={i} text='{}' j={j} text='{}'",
+                larger_area / smaller_area,
+                a.text,
+                b.text
+            );
+        }
+        return false;
+    }
+    if debug {
+        eprintln!(
+            "[extract-debug] DEDUP overlap drop i={i} text='{}' at ({:.1},{:.1} {}x{}) in favor of j={j} text='{}' at ({:.1},{:.1} {}x{}) overlap_ratio={:.2}",
+            a.text,
+            a.x,
+            a.y,
+            a.width,
+            a.height,
+            b.text,
+            b.x,
+            b.y,
+            b.width,
+            b.height,
+            intersection / smaller_area
+        );
+    }
+    true
+}
+
+/// Remove items an overlapping later item duplicates or overpaints.
+///
+/// An item is dropped iff *some later item* passes
+/// [`dedup_pair_drops_earlier`] — drops only ever hit the earlier item of a
+/// pair, so the result is independent of comparison order and the search can
+/// consult a uniform spatial grid: only items whose bounding boxes can
+/// intersect are ever compared. This must stay near-linear — single-page CAD
+/// exports and receipt ribbons reach 10⁵–10⁶ items, and this pass runs while
+/// holding the process-global PDFium lock.
+///
+/// Diagonal (non-right-angle) text never participates: its *loose*
+/// axis-aligned bounding box — the hull of a rotated glyph run — is far
+/// larger than the ink, so two stacked lines of the same skewed block report
+/// heavy bbox overlap even though the glyphs never touch. True duplicate
+/// stamps are upright and still handled.
 fn dedup_overlapping_items(items: &mut Vec<TextItem>, debug: bool) {
     if items.len() < 2 {
         return;
     }
 
-    let mut keep = vec![true; items.len()];
-    for i in 0..items.len() {
-        if !keep[i] {
+    let upright: Vec<u32> = (0..items.len())
+        .filter(|&i| !is_diagonal_rotation(items[i].rotation))
+        .map(|i| i as u32)
+        .collect();
+    if upright.len() < 2 {
+        return;
+    }
+
+    let (sum_w, sum_h) = upright.iter().fold((0.0f64, 0.0f64), |(w, h), &i| {
+        let it = &items[i as usize];
+        (w + it.width.max(0.0) as f64, h + it.height.max(0.0) as f64)
+    });
+    let avg_dim = ((sum_w + sum_h) / (2 * upright.len()) as f64) as f32;
+    let cell = avg_dim.clamp(DEDUP_MIN_CELL_SIZE, DEDUP_MAX_CELL_SIZE);
+    let cell_range = |it: &TextItem| -> (i32, i32, i32, i32) {
+        (
+            (it.x / cell).floor() as i32,
+            ((it.x + it.width) / cell).floor() as i32,
+            (it.y / cell).floor() as i32,
+            ((it.y + it.height) / cell).floor() as i32,
+        )
+    };
+
+    let mut grid: std::collections::HashMap<(i32, i32), Vec<u32>> =
+        std::collections::HashMap::new();
+    let mut oversized: Vec<u32> = Vec::new();
+    for &idx in &upright {
+        let (cx0, cx1, cy0, cy1) = cell_range(&items[idx as usize]);
+        let cells = (cx1 as i64 - cx0 as i64 + 1) * (cy1 as i64 - cy0 as i64 + 1);
+        if cells > DEDUP_MAX_CELLS_PER_ITEM {
+            oversized.push(idx);
             continue;
         }
-        for j in (i + 1)..items.len() {
-            if !keep[j] {
-                continue;
+        for cx in cx0..=cx1 {
+            for cy in cy0..=cy1 {
+                grid.entry((cx, cy)).or_default().push(idx);
             }
+        }
+    }
 
-            let a = &items[i];
-            let b = &items[j];
-
-            // Diagonal (non-right-angle) text has a *loose* axis-aligned
-            // bounding box — the hull of a rotated glyph run is far larger than
-            // the ink, so two stacked lines of the same skewed block (e.g.
-            // "Paris has the" above "eiffel tower" at 51°) report heavy bbox
-            // overlap even though the glyphs never touch. Dedup keys off AABB
-            // overlap, so it would wrongly drop one of those lines. Skip the
-            // comparison entirely when either item is diagonal; true duplicate
-            // stamps are upright and still handled below.
-            if is_diagonal_rotation(a.rotation) || is_diagonal_rotation(b.rotation) {
-                continue;
+    let mut keep = vec![true; items.len()];
+    // Generation stamps so a candidate sharing several cells with the current
+    // item is only tested once.
+    let mut last_seen = vec![u32::MAX; items.len()];
+    for (generation, &i) in upright.iter().enumerate() {
+        let i = i as usize;
+        let generation = generation as u32;
+        last_seen[i] = generation;
+        let mut check = |j: u32, keep_i: &mut bool| -> bool {
+            let j = j as usize;
+            if j <= i || last_seen[j] == generation {
+                return false;
             }
-
-            // Compute intersection area
-            let ix_left = a.x.max(b.x);
-            let ix_right = (a.x + a.width).min(b.x + b.width);
-            let iy_top = a.y.max(b.y);
-            let iy_bottom = (a.y + a.height).min(b.y + b.height);
-
-            if ix_left >= ix_right || iy_top >= iy_bottom {
-                continue; // no overlap
+            last_seen[j] = generation;
+            if dedup_pair_drops_earlier(items, i, j, debug) {
+                *keep_i = false;
+                return true; // i is gone, move to next i
             }
-
-            let intersection = (ix_right - ix_left) * (iy_bottom - iy_top);
-            let area_a = a.width * a.height;
-            let area_b = b.width * b.height;
-            let smaller_area = area_a.min(area_b);
-
-            if items[i].text == items[j].text {
-                // Exact text match: require strong bounding-box overlap before
-                // dedup. The same word routinely appears more than once on a
-                // page in different positions; firing on any overlap would drop
-                // a legitimate occurrence when two identical words' bboxes share
-                // even a sliver of area (e.g. one column's word vertically
-                // adjacent to another column's identical word with a slack
-                // loose-box), corrupting that line.
-                //
-                // Require ≥50% overlap of the smaller item — same threshold
-                // as the non-exact branch. True duplicate stamps overlap
-                // essentially 100%; unrelated repeats overlap 0%.
-                let strong_overlap = smaller_area > 0.0 && intersection / smaller_area > 0.5;
-                if !strong_overlap {
-                    continue;
-                }
-                if debug {
-                    eprintln!(
-                        "[extract-debug] DEDUP exact-match drop i={i} text='{}' at ({:.1},{:.1} {}x{}) in favor of j={j} at ({:.1},{:.1} {}x{}) overlap_ratio={:.2}",
-                        items[i].text,
-                        items[i].x,
-                        items[i].y,
-                        items[i].width,
-                        items[i].height,
-                        items[j].x,
-                        items[j].y,
-                        items[j].width,
-                        items[j].height,
-                        intersection / smaller_area
-                    );
-                }
-                keep[i] = false;
-                break; // i is gone, move to next i
-            } else if smaller_area > 0.0 && intersection / smaller_area > 0.5 {
-                // Different text but >50% overlap of the smaller item:
-                // likely overlapping text layers (e.g. old/new branding).
-                // Keep the later one (rendered on top in PDF paint order).
-                //
-                // However, skip dedup when the items have very different sizes
-                // (area ratio > 5x). This happens when a small cell value sits
-                // inside a row-spanning element like a dotted leader — these are
-                // separate content, not overlapping layers.
-                let larger_area = area_a.max(area_b);
-                if larger_area / smaller_area > 5.0 {
-                    if debug {
-                        eprintln!(
-                            "[extract-debug] DEDUP skip (area ratio {:.1}x) i={i} text='{}' j={j} text='{}'",
-                            larger_area / smaller_area,
-                            items[i].text,
-                            items[j].text
-                        );
+            false
+        };
+        let (cx0, cx1, cy0, cy1) = cell_range(&items[i]);
+        let cells = (cx1 as i64 - cx0 as i64 + 1) * (cy1 as i64 - cy0 as i64 + 1);
+        'search: {
+            // An oversized item's cell walk would be huge; its overlap
+            // partners are found by the exhaustive pass below instead.
+            if cells <= DEDUP_MAX_CELLS_PER_ITEM {
+                for cx in cx0..=cx1 {
+                    for cy in cy0..=cy1 {
+                        let Some(bucket) = grid.get(&(cx, cy)) else {
+                            continue;
+                        };
+                        for &j in bucket {
+                            if check(j, &mut keep[i]) {
+                                break 'search;
+                            }
+                        }
                     }
-                    continue;
                 }
-                if debug {
-                    eprintln!(
-                        "[extract-debug] DEDUP overlap drop i={i} text='{}' at ({:.1},{:.1} {}x{}) in favor of j={j} text='{}' at ({:.1},{:.1} {}x{}) overlap_ratio={:.2}",
-                        items[i].text,
-                        items[i].x,
-                        items[i].y,
-                        items[i].width,
-                        items[i].height,
-                        items[j].text,
-                        items[j].x,
-                        items[j].y,
-                        items[j].width,
-                        items[j].height,
-                        intersection / smaller_area
-                    );
+                for &j in &oversized {
+                    if check(j, &mut keep[i]) {
+                        break 'search;
+                    }
                 }
-                keep[i] = false;
-                break; // i is gone, move to next i
+            } else {
+                for &j in &upright {
+                    if check(j, &mut keep[i]) {
+                        break 'search;
+                    }
+                }
             }
         }
     }
@@ -3096,6 +3183,117 @@ mod tests {
         ];
         dedup_overlapping_items(&mut items, false);
         assert_eq!(items.len(), 2);
+    }
+
+    /// Exhaustive-search oracle: applies the dedup rule ("drop an item iff
+    /// some later upright item passes the pair predicate") by checking every
+    /// pair. The grid-backed search must match this on any layout.
+    fn dedup_overlapping_items_exhaustive(items: &mut Vec<TextItem>) {
+        if items.len() < 2 {
+            return;
+        }
+        let mut keep = vec![true; items.len()];
+        for i in 0..items.len() {
+            for j in (i + 1)..items.len() {
+                if is_diagonal_rotation(items[i].rotation)
+                    || is_diagonal_rotation(items[j].rotation)
+                {
+                    continue;
+                }
+                if dedup_pair_drops_earlier(items, i, j, false) {
+                    keep[i] = false;
+                    break;
+                }
+            }
+        }
+        let mut idx = 0;
+        items.retain(|_| {
+            let k = keep[idx];
+            idx += 1;
+            k
+        });
+    }
+
+    #[test]
+    fn dedup_grid_matches_exhaustive_on_random_layouts() {
+        // Deterministic LCG so failures reproduce.
+        let mut state = 0x2545F4914F6CDD1Du64;
+        let mut next = move || {
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            (state >> 33) as f32 / (1u64 << 31) as f32
+        };
+        for round in 0..50 {
+            let n = 20 + (round * 17) % 300;
+            let mut items: Vec<TextItem> = (0..n)
+                .map(|k| {
+                    // Cluster positions so overlaps are common, vary size so
+                    // both the area-ratio skip and the oversized side-list
+                    // trigger, and reuse a small text alphabet so exact-match
+                    // dedup fires.
+                    let big = next() < 0.05;
+                    TextItem {
+                        rotation: if next() < 0.1 { 51.0 } else { 0.0 },
+                        ..ti(
+                            ["a", "b", "cc", "ddd"][k % 4],
+                            next() * 200.0,
+                            next() * 3000.0,
+                            if big { 500.0 } else { 4.0 + next() * 30.0 },
+                            if big { 2000.0 } else { 4.0 + next() * 12.0 },
+                        )
+                    }
+                })
+                .collect();
+            let mut expected = items.clone();
+            dedup_overlapping_items_exhaustive(&mut expected);
+            dedup_overlapping_items(&mut items, false);
+            let got: Vec<_> = items
+                .iter()
+                .map(|it| (it.text.clone(), it.x, it.y))
+                .collect();
+            let want: Vec<_> = expected
+                .iter()
+                .map(|it| (it.text.clone(), it.x, it.y))
+                .collect();
+            assert_eq!(
+                got, want,
+                "grid dedup diverged from oracle on round {round}"
+            );
+        }
+    }
+
+    #[test]
+    fn dedup_scales_to_ribbon_pages() {
+        // Single-page CAD exports / receipt ribbons put 10⁵–10⁶ items on one
+        // page; dedup must stay effectively linear there. A hang here (CI
+        // timeout) means quadratic behavior regressed.
+        let n: usize = 200_000;
+        let mut items: Vec<TextItem> = (0..n)
+            .map(|k| {
+                // Every 10th item is a near-exact restamp of its predecessor
+                // (slightly nudged, same text) so the exact-match dedup path
+                // fires; everything else is a disjoint grid cell.
+                let dup = k % 10 == 0 && k > 0;
+                let base = if dup { k - 1 } else { k };
+                let col = (base % 40) as f32;
+                let row = (base / 40) as f32;
+                ti(
+                    "cell",
+                    col * 5.0 + if dup { 0.3 } else { 0.0 },
+                    row * 8.0,
+                    4.0,
+                    6.0,
+                )
+            })
+            .collect();
+        dedup_overlapping_items(&mut items, false);
+        let dups = (n - 1) / 10;
+        assert!(
+            items.len() <= n - dups && items.len() >= n - 2 * dups,
+            "expected ~{dups} restamped predecessors dropped, got {} of {n} items left",
+            items.len()
+        );
     }
 
     #[test]
