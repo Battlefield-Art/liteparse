@@ -1,14 +1,5 @@
 // Process-isolated worker pool for LiteParse.
 //
-// PDFium work happens behind a process-global lock, and a single PDFium FFI
-// call cannot be interrupted from inside the process — worker_threads would
-// not help (same process, same lock, and terminate() cannot preempt native
-// code). The only enforceable timeout is a process boundary: parses run in
-// forked worker processes (see pool-worker.ts), and a worker that blows its
-// deadline is SIGKILLed and replaced. Because each worker has its own PDFium,
-// pooled parses also run genuinely in parallel instead of queueing on the
-// lock.
-//
 // Not public API; use `new LiteParse({ poolSize, parseTimeoutMs })`.
 
 import { fork, type ChildProcess } from "node:child_process";

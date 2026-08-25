@@ -572,21 +572,10 @@ class LiteParse:
                 merged horizontal/vertical line segments. Default False.
             pool_size: Route :meth:`parse` through a pool of this many
                 persistent worker processes instead of parsing in-process.
-                Each worker has its own PDFium instance, so pooled parses run
-                genuinely in parallel (in-process parses serialize on a
-                process-global PDFium lock) and a stuck document can be
-                killed without leaking a wedged thread. Workers are spawned
-                once and reused; per-parse overhead is IPC serialization
-                only. Other methods (:meth:`parse_batches`,
-                :meth:`is_complex`, :meth:`screenshot`) still run in-process.
                 Call :meth:`close` (or use ``with``) to shut workers down.
             parse_timeout: Hard per-parse deadline in seconds. Requires
-                ``pool_size``: a deadline is only honest when it can actually
-                stop the work, and an in-process parse stuck inside a single
-                PDFium FFI call cannot be interrupted — the pool enforces the
-                deadline by killing the worker process. On expiry the parse
-                raises :class:`ParseTimeoutError` (naming the document) and a
-                fresh worker replaces the killed one.
+                ``pool_size``: On expiry the parse raises :class:`ParseTimeoutError`
+                (naming the document) and a fresh worker replaces the killed one.
         """
         kwargs = {}
         if ocr_enabled is not None:
@@ -668,11 +657,7 @@ class LiteParse:
 
         if parse_timeout is not None and pool_size is None:
             raise ValueError(
-                "parse_timeout requires pool_size: an in-process parse stuck "
-                "inside a PDFium call cannot be interrupted, so a timeout "
-                "without process isolation would be a promise LiteParse "
-                "cannot keep. Set pool_size (e.g. pool_size=1) to enforce "
-                "the deadline by killing the worker process."
+                "parse_timeout requires pool_size"
             )
         self._pool = None
         if pool_size is not None:

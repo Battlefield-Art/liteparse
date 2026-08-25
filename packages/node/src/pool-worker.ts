@@ -1,10 +1,4 @@
 // Entry point for pool worker processes, forked by pool.ts.
-//
-// Each worker holds its own native LiteParse instance — and therefore its own
-// PDFium instance and PDFium lock — so pooled parses run genuinely in
-// parallel and a stuck parse can be killed by killing this process. The
-// parent speaks over the fork() IPC channel (advanced serialization), one
-// request in flight at a time.
 
 import { native, type LiteParseNative } from "./native.js";
 import { toParseResult } from "./lib.js";

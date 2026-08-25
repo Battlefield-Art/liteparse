@@ -1,27 +1,5 @@
 """Process-isolated worker pool for LiteParse.
 
-PDFium work happens behind a process-global lock, and a single PDFium FFI
-call cannot be interrupted from inside the process — a thread stuck in one
-holds the lock until the call returns, no matter what deadline the caller
-wanted. The only enforceable timeout is a process boundary: run parses in
-dedicated worker processes and kill a worker outright when it blows its
-deadline.
-
-This module implements that boundary:
-
-- Each worker is a subprocess running ``python -m liteparse._pool`` with its
-  own native LiteParse instance (and therefore its own PDFium instance and
-  its own PDFium lock). Workers are persistent — spawn and import cost is
-  paid once per worker, not per parse.
-- Requests and responses are pickled frames over the worker's stdin/stdout.
-  The worker's real stdout is reserved for the protocol; fd 1 is redirected
-  to stderr immediately so stray prints (native progress logs, user hooks)
-  cannot corrupt it.
-- A parse that exceeds ``parse_timeout`` gets its worker SIGKILLed and a
-  replacement spawned; the caller receives :class:`ParseTimeoutError` naming
-  the document. Because each worker has its own PDFium, one stuck document
-  never blocks the others (no cross-worker lock convoy).
-
 The pool is not public API; use ``LiteParse(pool_size=..., parse_timeout=...)``.
 """
 

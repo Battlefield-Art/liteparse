@@ -26,23 +26,14 @@ export type ImageMode = "off" | "placeholder" | "embed";
 /** Options for pool mode: parsing in persistent, killable worker processes. */
 export interface PoolOptions {
   /**
-   * Route `parse()` through a pool of this many persistent worker processes
-   * instead of parsing in-process. Each worker has its own PDFium instance,
-   * so pooled parses run genuinely in parallel — in-process parses (including
-   * concurrent `parse()` promises) serialize on a process-global PDFium lock
-   * — and a stuck document can be killed without leaking a wedged thread.
-   * Workers are forked once and reused; per-parse overhead is IPC
-   * serialization only. Only `parse()` is routed through the pool; other
-   * methods still run in-process. Call `close()` when done (an idle pool
-   * never keeps the event loop alive, but explicit shutdown frees workers
-   * immediately).
+   * Route `parse()` through a pool of this many persistent worker processes.
+   * Call `close()` when done (an idle pool never keeps the event loop alive, 
+   * but explicit shutdown frees workers immediately).
    */
   poolSize?: number;
   /**
-   * Hard per-parse deadline in milliseconds. Requires `poolSize`: a deadline
-   * is only honest when it can actually stop the work, and an in-process
-   * parse stuck inside a single PDFium FFI call cannot be interrupted — the
-   * pool enforces the deadline by SIGKILLing the worker process. On expiry
+   * Hard per-parse deadline in milliseconds. Requires `poolSize`.
+   * The pool enforces the deadline by SIGKILLing the worker. On expiry
    * the parse rejects with {@link ParseTimeoutError} (naming the document)
    * and a fresh worker replaces the killed one.
    */
@@ -685,11 +676,7 @@ export class LiteParse {
       userConfig.poolSize === undefined
     ) {
       throw new Error(
-        "parseTimeoutMs requires poolSize: an in-process parse stuck inside " +
-          "a PDFium call cannot be interrupted, so a timeout without process " +
-          "isolation would be a promise LiteParse cannot keep. Set poolSize " +
-          "(e.g. poolSize: 1) to enforce the deadline by killing the worker " +
-          "process.",
+        "parseTimeoutMs requires poolSize"
       );
     }
     if (userConfig.poolSize !== undefined) {
