@@ -934,7 +934,8 @@ pub struct ImageRect {
 // ---------------------------------------------------------------------------
 
 /// Wraps a JS object that exposes an async `recognize(imageData, width, height, language)`
-/// method, returning `Promise<Array<{text, bbox, confidence}>>`.
+/// method, returning `Promise<Array<{text, bbox, confidence}>>`. `imageData`
+/// is PNG-encoded (the documented contract), not the raw pixel buffer.
 ///
 /// `JsValue` is `!Send`, but on `wasm32` (single-threaded) the trait does not
 /// require `Send + Sync`, so this works.
@@ -970,13 +971,18 @@ impl OcrEngine for JsOcrEngine {
                 > + '_,
         >,
     > {
-        // Copy bytes into a JS Uint8Array up-front (must happen on the
-        // current thread anyway in wasm).
-        let arr = Uint8Array::new_with_length(image_data.len() as u32);
-        arr.copy_from(image_data);
+        // The documented JS contract is PNG bytes (packages/wasm/README.md):
+        // browser OCR libraries (tesseract.js, remote services) consume
+        // encoded images, not raw pixel buffers. `image_data` is the render
+        // pipeline's tightly-packed grayscale or RGB buffer.
+        let png = liteparse::extract::encode_pixels_png(image_data, width, height)
+            .map_err(|e| format!("failed to PNG-encode page for ocrEngine.recognize: {e}"));
         let language = options.language.clone();
 
         Box::pin(async move {
+            let png = png?;
+            let arr = Uint8Array::new_with_length(png.len() as u32);
+            arr.copy_from(&png);
             let recognize: JsValue = Reflect::get(&self.obj, &JsValue::from_str("recognize"))
                 .map_err(|e| format!("ocrEngine.recognize lookup failed: {:?}", e))?;
             let recognize: Function = recognize
@@ -1037,6 +1043,7 @@ pub struct OcrResult {
 #[wasm_bindgen(typescript_custom_section)]
 const TS_EXTRA: &'static str = r#"
 export interface OcrEngine {
+  /** `imageData` is a PNG-encoded render of the page, `width`/`height` its pixel dimensions. */
   recognize(imageData: Uint8Array, width: number, height: number, language: string): Promise<OcrResult[]>;
 }
 
