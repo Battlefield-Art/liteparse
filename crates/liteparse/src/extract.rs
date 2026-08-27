@@ -1670,14 +1670,30 @@ fn extract_page_text_items(
             if !y_overlap || line_changed || gap >= MAX_INLINE_GAP || dot_leader_break {
                 seg.flush(&mut items);
                 let meta = obj_meta.meta_for(&ch, cv.text_object());
-                seg.start(c, &vp_loose, &vp_strict, &cv, recovered, page_rotation, &meta);
+                seg.start(
+                    c,
+                    &vp_loose,
+                    &vp_strict,
+                    &cv,
+                    recovered,
+                    page_rotation,
+                    &meta,
+                );
                 seg.append_ligature_tail(ligature_tail);
             } else if seg.pending_space {
                 let avg_cw = seg.avg_char_width();
                 if gap > avg_cw * 2.2 {
                     seg.flush(&mut items);
                     let meta = obj_meta.meta_for(&ch, cv.text_object());
-                    seg.start(c, &vp_loose, &vp_strict, &cv, recovered, page_rotation, &meta);
+                    seg.start(
+                        c,
+                        &vp_loose,
+                        &vp_strict,
+                        &cv,
+                        recovered,
+                        page_rotation,
+                        &meta,
+                    );
                     seg.append_ligature_tail(ligature_tail);
                 } else {
                     // Genuine inline space PDFium emitted: sample its size
@@ -1753,7 +1769,15 @@ fn extract_page_text_items(
             }
         } else {
             let meta = obj_meta.meta_for(&ch, cv.text_object());
-            seg.start(c, &vp_loose, &vp_strict, &cv, recovered, page_rotation, &meta);
+            seg.start(
+                c,
+                &vp_loose,
+                &vp_strict,
+                &cv,
+                recovered,
+                page_rotation,
+                &meta,
+            );
             seg.append_ligature_tail(ligature_tail);
         }
     }
@@ -2383,9 +2407,7 @@ impl<'a> GlyphDecoder<'a> {
 
 /// Control/PUA/sentinel codepoints that signal a garbage /ToUnicode mapping.
 fn is_suspicious_unicode(unicode: u32) -> bool {
-    matches!(unicode, 0 | 0xFFFE | 0xFFFF)
-        || unicode < 0x20
-        || (0xE000..=0xF8FF).contains(&unicode)
+    matches!(unicode, 0 | 0xFFFE | 0xFFFF) || unicode < 0x20 || (0xE000..=0xF8FF).contains(&unicode)
 }
 
 /// Prescan: flag fonts whose /ToUnicode maps a high fraction of chars into
@@ -2679,7 +2701,10 @@ impl<'a, 'page, 'lib: 'page> CharInfoChunks<'a, 'page, 'lib> {
         let off = i - self.start;
         if off < 0 || off as usize >= self.buf.len() {
             self.buf.resize(CHAR_INFO_CHUNK, Default::default());
-            let written = self.text_page.char_infos_batch(i, &mut self.buf).unwrap_or(0);
+            let written = self
+                .text_page
+                .char_infos_batch(i, &mut self.buf)
+                .unwrap_or(0);
             self.buf.truncate(written);
             self.start = i;
         }
@@ -2792,8 +2817,8 @@ fn prescan_page_batched(
 
         // Visible/invisible tally (mirrors `should_skip_invisible`).
         if !matches!(unicode, 0 | 0xFFFE | 0xFFFF) {
-            let ws_or_ctrl = char::from_u32(unicode)
-                .is_some_and(|c| c.is_whitespace() || c.is_control());
+            let ws_or_ctrl =
+                char::from_u32(unicode).is_some_and(|c| c.is_whitespace() || c.is_control());
             if !ws_or_ctrl && !generated {
                 if rec.text_render_mode == 3 {
                     invisible += 1;
