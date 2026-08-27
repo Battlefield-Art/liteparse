@@ -212,15 +212,6 @@ pub struct PdfiumBindings {
         unsafe extern "C" fn(FPDF_TEXTPAGE, std::os::raw::c_int) -> std::os::raw::c_uint,
     pub FPDFText_GetCharCode:
         unsafe extern "C" fn(FPDF_TEXTPAGE, std::os::raw::c_int) -> std::os::raw::c_uint,
-    /// Fork API (chromium/8028+); absent in older fork builds, so optional.
-    pub FPDFText_GetCharInfoBatch: Option<
-        unsafe extern "C" fn(
-            FPDF_TEXTPAGE,
-            std::os::raw::c_int,
-            std::os::raw::c_int,
-            *mut FPDF_CHARINFO_LP,
-        ) -> std::os::raw::c_int,
-    >,
     pub FPDFText_GetFontSize: unsafe extern "C" fn(FPDF_TEXTPAGE, std::os::raw::c_int) -> f64,
     pub FPDFText_GetFontWeight:
         unsafe extern "C" fn(FPDF_TEXTPAGE, std::os::raw::c_int) -> std::os::raw::c_int,
@@ -622,7 +613,6 @@ impl PdfiumBindings {
             FPDFText_CountChars: load_fn!(lib, "FPDFText_CountChars"),
             FPDFText_GetUnicode: load_fn!(lib, "FPDFText_GetUnicode"),
             FPDFText_GetCharCode: load_fn!(lib, "FPDFText_GetCharCode"),
-            FPDFText_GetCharInfoBatch: load_fn_opt!(lib, "FPDFText_GetCharInfoBatch"),
             FPDFText_GetFontSize: load_fn!(lib, "FPDFText_GetFontSize"),
             FPDFText_GetFontWeight: load_fn!(lib, "FPDFText_GetFontWeight"),
             FPDFText_GetFontInfo: load_fn!(lib, "FPDFText_GetFontInfo"),
