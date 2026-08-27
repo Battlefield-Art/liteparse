@@ -917,6 +917,34 @@ pub(crate) fn encode_png(rgba: &[u8], width: u32, height: u32) -> Result<Vec<u8>
     Ok(png_buf)
 }
 
+/// Encode tightly-packed pixel bytes to PNG, inferring the color type from the
+/// buffer length: 1 byte/px (grayscale), 3 (RGB), or 4 (RGBA). The OCR render
+/// pipeline produces the first two (`RenderedPage::pixels`); the wasm OCR
+/// bridge uses this to hand PNG bytes to the JS `recognize` callback.
+pub fn encode_pixels_png(
+    pixels: &[u8],
+    width: u32,
+    height: u32,
+) -> Result<Vec<u8>, LiteParseError> {
+    let px = width as usize * height as usize;
+    let color = if px > 0 && pixels.len() == px {
+        image::ExtendedColorType::L8
+    } else if px > 0 && pixels.len() == px * 3 {
+        image::ExtendedColorType::Rgb8
+    } else if px > 0 && pixels.len() == px * 4 {
+        image::ExtendedColorType::Rgba8
+    } else {
+        return Err(LiteParseError::Other(format!(
+            "pixel buffer length {} does not match {width}x{height} at 1/3/4 bytes per pixel",
+            pixels.len()
+        )));
+    };
+    let mut png_buf = Vec::new();
+    let encoder = image::codecs::png::PngEncoder::new(&mut png_buf);
+    encoder.write_image(pixels, width, height, color)?;
+    Ok(png_buf)
+}
+
 /// Walk image objects on a page and return a stable per-page `ImageRef` for
 /// each one. `obj_index` is the index among image-typed page objects (not all
 /// page objects), so a later embed pass can pull pixel bytes via
@@ -2908,6 +2936,29 @@ impl SegmentBuilder {
 mod tests {
     use super::*;
     use std::f32::consts::PI;
+
+    #[test]
+    fn encode_pixels_png_infers_color_type() {
+        for (bpp, expected_color) in [
+            (1, image::ColorType::L8),
+            (3, image::ColorType::Rgb8),
+            (4, image::ColorType::Rgba8),
+        ] {
+            let pixels = vec![0x7Fu8; 2 * 3 * bpp];
+            let png = encode_pixels_png(&pixels, 2, 3).unwrap();
+            assert_eq!(&png[..8], b"\x89PNG\r\n\x1a\n");
+            let decoded = image::load_from_memory(&png).unwrap();
+            assert_eq!((decoded.width(), decoded.height()), (2, 3));
+            assert_eq!(decoded.color(), expected_color);
+        }
+    }
+
+    #[test]
+    fn encode_pixels_png_rejects_mismatched_length() {
+        assert!(encode_pixels_png(&[0u8; 5], 2, 3).is_err());
+        assert!(encode_pixels_png(&[], 2, 3).is_err());
+        assert!(encode_pixels_png(&[0u8; 3], 0, 0).is_err());
+    }
 
     fn rotated_text_pdf() -> Vec<u8> {
         let content =

@@ -82,6 +82,10 @@
             if (imageData.length === 0) {
               throw new Error("OCR input is empty");
             }
+            const pngSignature = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
+            if (!pngSignature.every((byte, index) => imageData[index] === byte)) {
+              throw new Error("OCR input is not PNG-encoded");
+            }
             if (width <= 0 || height <= 0) {
               throw new Error(`Invalid OCR dimensions: ${width}x${height}`);
             }
