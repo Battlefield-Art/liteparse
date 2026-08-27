@@ -227,16 +227,30 @@ pub struct PdfFormField {
 pub struct Page<'doc, 'lib: 'doc> {
     pub(crate) handle: pdfium_sys::FPDF_PAGE,
     pub(crate) doc_handle: pdfium_sys::FPDF_DOCUMENT,
+    /// `/UserUnit` multiplier (1.0 for normal pages). PDFium reports all
+    /// geometry in raw MediaBox units, so viewport-space output and render
+    /// pixel sizing multiply by this to recover the page's real scale (see
+    /// `crate::user_unit`).
+    pub(crate) user_unit: f32,
     pub(crate) _doc: PhantomData<&'doc Document<'lib>>,
 }
 
 impl<'doc, 'lib: 'doc> Page<'doc, 'lib> {
+    /// Page width in raw MediaBox units, exactly as PDFium reports it
+    /// (ignores `/UserUnit`; multiply by [`Self::user_unit`] for the real
+    /// size, or use [`Self::viewport_size`] which already does).
     pub fn width(&self) -> f32 {
         unsafe { ffi!(FPDF_GetPageWidthF(self.handle)) }
     }
 
+    /// Page height in raw MediaBox units (see [`Self::width`]).
     pub fn height(&self) -> f32 {
         unsafe { ffi!(FPDF_GetPageHeightF(self.handle)) }
+    }
+
+    /// The page's `/UserUnit` multiplier, 1.0 when absent.
+    pub fn user_unit(&self) -> f32 {
+        self.user_unit
     }
 
     pub fn rotation(&self) -> i32 {
@@ -244,10 +258,12 @@ impl<'doc, 'lib: 'doc> Page<'doc, 'lib> {
     }
 
     /// Page dimensions in the same rotation-adjusted viewport coordinate
-    /// space returned by [`Self::page_to_viewport`].
+    /// space returned by [`Self::page_to_viewport`]. Unlike [`Self::width`]/
+    /// [`Self::height`], this applies the `/UserUnit` multiplier, so the
+    /// result is in real points (1/72 inch).
     pub fn viewport_size(&self, view_box: &RectF) -> (f32, f32) {
-        let mut width = (view_box.right - view_box.left).abs();
-        let mut height = (view_box.top - view_box.bottom).abs();
+        let mut width = (view_box.right - view_box.left).abs() * self.user_unit;
+        let mut height = (view_box.top - view_box.bottom).abs() * self.user_unit;
         if matches!(self.rotation(), 1 | 3) {
             std::mem::swap(&mut width, &mut height);
         }
@@ -281,8 +297,12 @@ impl<'doc, 'lib: 'doc> Page<'doc, 'lib> {
     pub fn page_to_viewport(&self, view_box: &RectF, page_x: f32, page_y: f32) -> (f32, f32) {
         let (vw, vh) = self.viewport_size(view_box);
 
-        let device_w = (vw * 1000.0).round() as i32;
-        let device_h = (vh * 1000.0).round() as i32;
+        // 1000x is the precision multiplier for the integer device space.
+        // `/UserUnit` pages can be hundreds of thousands of points tall, so
+        // cap the multiplier to keep the device box inside i32 range.
+        let mult = 1000.0f32.min((i32::MAX / 4) as f32 / vw.max(vh).max(1.0));
+        let device_w = (vw * mult).round() as i32;
+        let device_h = (vh * mult).round() as i32;
         let mut dx: i32 = 0;
         let mut dy: i32 = 0;
 
@@ -301,7 +321,7 @@ impl<'doc, 'lib: 'doc> Page<'doc, 'lib> {
             ));
         }
 
-        (dx as f32 / 1000.0, dy as f32 / 1000.0)
+        (dx as f32 / mult, dy as f32 / mult)
     }
 
     /// Convert bounds from PDF page space to viewport space (top-left origin).
@@ -374,7 +394,10 @@ impl<'doc, 'lib: 'doc> Page<'doc, 'lib> {
         dpi: f32,
         form: Option<&FormEnvironment>,
     ) -> Result<Bitmap<'lib>, PdfiumError> {
-        let scale = dpi / 72.0;
+        // `/UserUnit` scales the physical page, so honoring the requested
+        // DPI means scaling the pixel size by it too — otherwise a UserUnit
+        // page renders at dpi/user_unit and its text rasterizes microscopic.
+        let scale = dpi / 72.0 * self.user_unit;
         let width = (self.width() * scale).round() as i32;
         let height = (self.height() * scale).round() as i32;
 

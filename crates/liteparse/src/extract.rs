@@ -2955,6 +2955,101 @@ mod tests {
         pdf
     }
 
+    /// One normal page plus a `/UserUnit 36` page whose text is written at
+    /// 0.3 pt — real size 10.8 pt. PDFium reports the raw sub-point metrics,
+    /// so without the user-unit rescale every char on page 2 dies in the
+    /// zero-height (< 0.5 pt) filter, which is exactly how spreadsheet-export
+    /// invoices used to parse as completely empty pages.
+    fn user_unit_pdf() -> Vec<u8> {
+        let normal = b"BT /F1 10 Tf 20 40 Td (NORMALMARK) Tj ET";
+        let tiny = b"BT /F1 0.3 Tf 2 50 Td (TINYMARK) Tj ET";
+        let objects: Vec<Vec<u8>> = vec![
+            b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
+            b"<< /Type /Pages /Kids [3 0 R 4 0 R] /Count 2 >>".to_vec(),
+            b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 300] /Resources << /Font << /F1 7 0 R >> >> /Contents 5 0 R >>".to_vec(),
+            b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 40 100] /UserUnit 36 /Resources << /Font << /F1 7 0 R >> >> /Contents 6 0 R >>".to_vec(),
+            [
+                format!("<< /Length {} >>\nstream\n", normal.len()).as_bytes(),
+                normal.as_slice(),
+                b"\nendstream",
+            ]
+            .concat(),
+            [
+                format!("<< /Length {} >>\nstream\n", tiny.len()).as_bytes(),
+                tiny.as_slice(),
+                b"\nendstream",
+            ]
+            .concat(),
+            b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>".to_vec(),
+        ];
+        let mut pdf = b"%PDF-1.7\n".to_vec();
+        let mut offsets = Vec::with_capacity(objects.len());
+        for (index, object) in objects.iter().enumerate() {
+            offsets.push(pdf.len());
+            pdf.extend_from_slice(format!("{} 0 obj\n", index + 1).as_bytes());
+            pdf.extend_from_slice(object);
+            pdf.extend_from_slice(b"\nendobj\n");
+        }
+        let xref = pdf.len();
+        pdf.extend_from_slice(format!("xref\n0 {}\n", objects.len() + 1).as_bytes());
+        pdf.extend_from_slice(b"0000000000 65535 f \n");
+        for offset in offsets {
+            pdf.extend_from_slice(format!("{offset:010} 00000 n \n").as_bytes());
+        }
+        pdf.extend_from_slice(
+            format!(
+                "trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n",
+                objects.len() + 1
+            )
+            .as_bytes(),
+        );
+        pdf
+    }
+
+    #[test]
+    fn user_unit_page_extracts_text_at_real_scale() {
+        let pages =
+            extract_pages_from_input(&PdfInput::Bytes(user_unit_pdf()), None, usize::MAX, None)
+                .unwrap();
+
+        assert_eq!(pages.len(), 2);
+
+        // The normal page is untouched by the user-unit machinery.
+        assert_eq!((pages[0].page_width, pages[0].page_height), (200.0, 300.0));
+        let normal_text: String = pages[0]
+            .text_items
+            .iter()
+            .map(|i| i.text.as_str())
+            .collect();
+        assert!(normal_text.contains("NORMALMARK"), "page 1: {normal_text}");
+
+        // The /UserUnit 36 page reports its real dimensions...
+        assert_eq!(
+            (pages[1].page_width, pages[1].page_height),
+            (40.0 * 36.0, 100.0 * 36.0)
+        );
+        // ...and its 0.3 pt-written text survives extraction at ~10.8 pt.
+        let tiny_items: Vec<_> = pages[1]
+            .text_items
+            .iter()
+            .filter(|i| i.text.contains("TINYMARK"))
+            .collect();
+        assert_eq!(tiny_items.len(), 1, "items: {:?}", pages[1].text_items);
+        let item = tiny_items[0];
+        assert!(
+            item.height > 5.0 && item.height < 20.0,
+            "expected ~10.8pt tall text, got {}",
+            item.height
+        );
+        // Baseline sanity: the text sits in the upper half of the page in
+        // top-left viewport coordinates (written at y=50 of 100, scaled 36x).
+        assert!(
+            (item.y - (100.0 - 50.3) * 36.0).abs() < 36.0,
+            "unexpected y: {}",
+            item.y
+        );
+    }
+
     #[test]
     fn rotated_pages_use_viewport_dimensions_and_keep_edge_text() {
         let pages =

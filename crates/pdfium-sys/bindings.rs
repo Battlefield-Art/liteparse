@@ -1092,6 +1092,9 @@ unsafe extern "C" {
     pub fn FPDFPage_GetRotation(page: FPDF_PAGE) -> ::std::os::raw::c_int;
 }
 unsafe extern "C" {
+    pub fn FPDFPage_GetUserUnit(page: FPDF_PAGE) -> f32;
+}
+unsafe extern "C" {
     pub fn FPDFPage_SetRotation(page: FPDF_PAGE, rotate: ::std::os::raw::c_int);
 }
 unsafe extern "C" {

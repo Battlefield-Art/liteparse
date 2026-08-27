@@ -4,6 +4,13 @@ use crate::types::{PdfInput, ScreenshotRect};
 use pdfium::Library;
 use serde::Serialize;
 
+/// Cap on the rendered long edge in pixels. Normal pages never hit this
+/// (a US-Letter page at 150 DPI is ~1,650 px); it exists so freakishly tall
+/// pages — dense PDFs and especially `/UserUnit` spreadsheet exports — can't
+/// request multi-gigabyte bitmaps. 30,000 px keeps the historical behavior
+/// for every page under ~14,400 pt at 150 DPI.
+const MAX_RENDER_LONG_EDGE_PX: f32 = 30_000.0;
+
 /// A single rendered page as PNG bytes, plus raster-derived signals.
 #[derive(Debug, Clone)]
 pub struct RenderedPage {
@@ -81,7 +88,17 @@ pub(crate) fn render_document_pages(
             }
 
             let page = document.page((page_num - 1) as i32)?;
-            let bitmap = page.render_with_form(dpi, form.as_ref())?;
+            // `/UserUnit` pages (spreadsheet exports hundreds of thousands
+            // of points tall) would render to gigapixel bitmaps at the
+            // requested DPI; cap the long edge like the OCR render does.
+            let page_width = page.width() * page.user_unit();
+            let page_height = page.height() * page.user_unit();
+            let long_edge_pt = page_width.max(page_height);
+            let mut eff_dpi = dpi;
+            if long_edge_pt > 0.0 {
+                eff_dpi = eff_dpi.min(MAX_RENDER_LONG_EDGE_PX * 72.0 / long_edge_pt);
+            }
+            let bitmap = page.render_with_form(eff_dpi, form.as_ref())?;
             let width = bitmap.width() as u32;
             let height = bitmap.height() as u32;
             let rgba = bitmap.to_rgba();
@@ -94,8 +111,8 @@ pub(crate) fn render_document_pages(
                     &rgba,
                     width as usize,
                     height as usize,
-                    page.width(),
-                    page.height(),
+                    page_width,
+                    page_height,
                 )
             } else {
                 Vec::new()
