@@ -7,6 +7,7 @@ mod page;
 mod struct_tree;
 mod text_page;
 mod types;
+mod user_unit;
 
 pub use bitmap::Bitmap;
 pub use document::{Document, FormEnvironment, OutlineEntry, SignatureSummary, XfaPacket};

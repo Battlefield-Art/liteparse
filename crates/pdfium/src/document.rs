@@ -10,6 +10,11 @@ use crate::page::Page;
 /// process-wide PDFium lock has been released.
 pub struct Document<'lib> {
     pub(crate) handle: pdfium_sys::FPDF_DOCUMENT,
+    /// Per-page `/UserUnit` multipliers (see [`crate::user_unit`]); empty
+    /// when no page declares one, which is the overwhelmingly common case.
+    /// PDFium ignores `/UserUnit`, so pages carry this multiplier and apply
+    /// it to all viewport-space geometry and rendering.
+    pub(crate) page_user_units: Vec<f32>,
     pub(crate) _lib: std::marker::PhantomData<&'lib Library>,
 }
 
@@ -131,10 +136,48 @@ impl<'lib> Document<'lib> {
         if handle.is_null() {
             return Err(PdfiumError::PageNotFound);
         }
+        // Prefer the fork's dict-reading API; the byte-scan table (see
+        // `crate::user_unit`) is the fallback for binaries that predate it.
+        let user_unit = Self::user_unit_from_api(handle).unwrap_or_else(|| {
+            self.page_user_units
+                .get(index as usize)
+                .copied()
+                .unwrap_or(1.0)
+        });
         Ok(Page {
             handle,
             doc_handle: self.handle,
+            user_unit,
             _doc: std::marker::PhantomData,
+        })
+    }
+
+    /// Read `/UserUnit` through the fork's `FPDFPage_GetUserUnit` export.
+    /// `None` when the loaded pdfium binary does not provide it.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn user_unit_from_api(page: pdfium_sys::FPDF_PAGE) -> Option<f32> {
+        let get_user_unit = pdfium_sys::dynamic::pdfium().FPDFPage_GetUserUnit?;
+        let user_unit = unsafe { get_user_unit(page) };
+        // The API already clamps to >= 1.0; guard anyway so a misbehaving
+        // binary can't zero out all geometry.
+        Some(if user_unit.is_finite() && user_unit >= 1.0 {
+            user_unit
+        } else {
+            1.0
+        })
+    }
+
+    /// On wasm the export is statically linked (the pinned pdfium-binaries
+    /// release ships it), so unlike the dynamic path this can never be
+    /// absent at runtime — bumping the pin below a release that carries
+    /// `FPDFPage_GetUserUnit` would be a link error, not a silent fallback.
+    #[cfg(target_arch = "wasm32")]
+    fn user_unit_from_api(page: pdfium_sys::FPDF_PAGE) -> Option<f32> {
+        let user_unit = unsafe { pdfium_sys::FPDFPage_GetUserUnit(page) };
+        Some(if user_unit.is_finite() && user_unit >= 1.0 {
+            user_unit
+        } else {
+            1.0
         })
     }
 

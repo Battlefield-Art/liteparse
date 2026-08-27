@@ -109,6 +109,9 @@ pub struct PdfiumBindings {
         *mut std::os::raw::c_ulong,
     ) -> FPDF_BOOL,
 
+    pub FPDF_GetPageSizeByIndexF:
+        unsafe extern "C" fn(FPDF_DOCUMENT, std::os::raw::c_int, *mut FS_SIZEF) -> FPDF_BOOL,
+
     // -- Page --
     pub FPDF_LoadPage: unsafe extern "C" fn(FPDF_DOCUMENT, std::os::raw::c_int) -> FPDF_PAGE,
     pub FPDF_ClosePage: unsafe extern "C" fn(FPDF_PAGE),
@@ -116,6 +119,9 @@ pub struct PdfiumBindings {
     pub FPDF_GetPageHeightF: unsafe extern "C" fn(FPDF_PAGE) -> f32,
     pub FPDF_GetPageBoundingBox: unsafe extern "C" fn(FPDF_PAGE, *mut FS_RECTF) -> FPDF_BOOL,
     pub FPDFPage_GetRotation: unsafe extern "C" fn(FPDF_PAGE) -> std::os::raw::c_int,
+    /// LlamaParse fork API (absent from stock pdfium and older fork
+    /// releases); callers fall back to the raw-byte `/UserUnit` scan.
+    pub FPDFPage_GetUserUnit: Option<unsafe extern "C" fn(FPDF_PAGE) -> f32>,
     pub FPDFPage_Flatten:
         Option<unsafe extern "C" fn(FPDF_PAGE, std::os::raw::c_int) -> std::os::raw::c_int>,
     pub FPDF_PageToDevice: unsafe extern "C" fn(
@@ -549,6 +555,7 @@ impl PdfiumBindings {
             FPDF_LoadMemDocument: load_fn!(lib, "FPDF_LoadMemDocument"),
             FPDF_CloseDocument: load_fn!(lib, "FPDF_CloseDocument"),
             FPDF_GetPageCount: load_fn!(lib, "FPDF_GetPageCount"),
+            FPDF_GetPageSizeByIndexF: load_fn!(lib, "FPDF_GetPageSizeByIndexF"),
             FPDF_GetFormType: load_fn!(lib, "FPDF_GetFormType"),
             FPDFDOC_InitFormFillEnvironment: load_fn!(lib, "FPDFDOC_InitFormFillEnvironment"),
             FPDFDOC_ExitFormFillEnvironment: load_fn!(lib, "FPDFDOC_ExitFormFillEnvironment"),
@@ -574,6 +581,7 @@ impl PdfiumBindings {
             FPDF_GetPageHeightF: load_fn!(lib, "FPDF_GetPageHeightF"),
             FPDF_GetPageBoundingBox: load_fn!(lib, "FPDF_GetPageBoundingBox"),
             FPDFPage_GetRotation: load_fn!(lib, "FPDFPage_GetRotation"),
+            FPDFPage_GetUserUnit: load_fn_opt!(lib, "FPDFPage_GetUserUnit"),
             FPDFPage_Flatten: load_fn_opt!(lib, "FPDFPage_Flatten"),
             FPDF_PageToDevice: load_fn!(lib, "FPDF_PageToDevice"),
             FPDFPage_CountObjects: load_fn!(lib, "FPDFPage_CountObjects"),
