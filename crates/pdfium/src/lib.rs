@@ -22,6 +22,10 @@ pub use struct_tree::{StructNode, StructureAttributeValue, StructureElement};
 pub use text_page::{TextChar, TextCharIter, TextPage};
 pub use types::*;
 
+/// Raw FFI layer, re-exported for callers that need to hold raw handles
+/// (e.g. `FPDF_PAGEOBJECT`) returned by the safe wrappers.
+pub use pdfium_sys;
+
 /// Unified FFI call macro. On wasm, calls pdfium_sys extern functions directly.
 /// On non-wasm, calls through the runtime-loaded function pointers.
 #[cfg(not(target_arch = "wasm32"))]
