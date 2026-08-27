@@ -544,6 +544,31 @@ pub(crate) async fn ocr_and_merge_rendered(
     num_workers: usize,
     ocr_failure_fatal: bool,
 ) -> Result<(), LiteParseError> {
+    type OcrTaskResult = Result<Vec<OcrResult>, Box<dyn std::error::Error + Send + Sync>>;
+
+    // Browser WASM uses the JavaScript event loop. It has no Tokio runtime or
+    // blocking thread pool. Run each JavaScript OCR callback directly so the
+    // returned Promise can make progress on the browser event loop.
+    #[cfg(target_arch = "wasm32")]
+    let task_results: Vec<(usize, usize, f32, OcrTaskResult)> = {
+        let _ = num_workers;
+        let mut results = Vec::with_capacity(rendered.len());
+        for r in rendered {
+            let idx = r.idx;
+            let page_number = pages[idx].page_number;
+            let page_dpi = r.dpi;
+            let options = OcrOptions {
+                language: ocr_language.to_string(),
+                dpi: page_dpi,
+            };
+            let result = ocr_engine
+                .recognize(&r.pixels, r.width, r.height, &options)
+                .await;
+            results.push((idx, page_number, page_dpi, result));
+        }
+        results
+    };
+
     // Phase 1: spawn one async task per page. A semaphore limits how many run
     // `recognize` concurrently to `num_workers`.
     //
@@ -557,48 +582,63 @@ pub(crate) async fn ocr_and_merge_rendered(
     // request never goes out, the permit is never released, and the whole OCR
     // pass deadlocks. Acquiring the permit asynchronously parks the lightweight
     // task instead, so only `num_workers` blocking threads are ever consumed.
-    let num_workers = num_workers.max(1);
-    let semaphore = Arc::new(tokio::sync::Semaphore::new(num_workers));
-    let mut handles = Vec::with_capacity(rendered.len());
+    #[cfg(not(target_arch = "wasm32"))]
+    let task_results: Vec<(usize, usize, f32, OcrTaskResult)> = {
+        let num_workers = num_workers.max(1);
+        let semaphore = Arc::new(tokio::sync::Semaphore::new(num_workers));
+        let mut handles = Vec::with_capacity(rendered.len());
 
-    let handle = tokio::runtime::Handle::current();
+        let handle = tokio::runtime::Handle::current();
 
-    for r in rendered {
-        let engine = ocr_engine.clone();
-        let sem = semaphore.clone();
-        let language = ocr_language.to_string();
-        let page_number = pages[r.idx].page_number;
-        let rt_handle = handle.clone();
+        for r in rendered {
+            let engine = ocr_engine.clone();
+            let sem = semaphore.clone();
+            let language = ocr_language.to_string();
+            let page_number = pages[r.idx].page_number;
+            let rt_handle = handle.clone();
 
-        handles.push((
-            r.idx,
-            page_number,
-            r.dpi,
-            tokio::spawn(async move {
-                // Park the task (not an OS thread) until a permit is available.
-                let _permit = sem.acquire_owned().await.expect("semaphore closed");
-                let options = OcrOptions {
-                    language,
-                    dpi: r.dpi,
-                };
-                // Offload the (possibly CPU-blocking, e.g. Tesseract) recognize
-                // onto a blocking thread. Because the permit is already held,
-                // at most `num_workers` blocking threads are in use at once,
-                // leaving the rest of the pool free for the HTTP client's
-                // internal DNS resolution.
-                match tokio::task::spawn_blocking(move || {
-                    rt_handle.block_on(engine.recognize(&r.pixels, r.width, r.height, &options))
-                })
-                .await
-                {
-                    Ok(result) => result,
-                    Err(join_err) => {
-                        Err(Box::new(join_err) as Box<dyn std::error::Error + Send + Sync>)
+            handles.push((
+                r.idx,
+                page_number,
+                r.dpi,
+                tokio::spawn(async move {
+                    // Park the task (not an OS thread) until a permit is available.
+                    let _permit = sem.acquire_owned().await.expect("semaphore closed");
+                    let options = OcrOptions {
+                        language,
+                        dpi: r.dpi,
+                    };
+                    // Offload the (possibly CPU-blocking, e.g. Tesseract) recognize
+                    // onto a blocking thread. Because the permit is already held,
+                    // at most `num_workers` blocking threads are in use at once,
+                    // leaving the rest of the pool free for the HTTP client's
+                    // internal DNS resolution.
+                    match tokio::task::spawn_blocking(move || {
+                        rt_handle.block_on(engine.recognize(&r.pixels, r.width, r.height, &options))
+                    })
+                    .await
+                    {
+                        Ok(result) => result,
+                        Err(join_err) => {
+                            Err(Box::new(join_err) as Box<dyn std::error::Error + Send + Sync>)
+                        }
                     }
+                }),
+            ));
+        }
+
+        let mut results = Vec::with_capacity(handles.len());
+        for (idx, page_number, page_dpi, handle) in handles {
+            let result = match handle.await {
+                Ok(result) => result,
+                Err(join_err) => {
+                    Err(Box::new(join_err) as Box<dyn std::error::Error + Send + Sync>)
                 }
-            }),
-        ));
-    }
+            };
+            results.push((idx, page_number, page_dpi, result));
+        }
+        results
+    };
 
     // Phase 3: collect results and merge into pages.
 
@@ -614,32 +654,20 @@ pub(crate) async fn ocr_and_merge_rendered(
     // enrichment but already has all its text. We must only fail loud when OCR
     // failure destroyed a sparse page's likely primary text source — otherwise
     // a broken OCR setup would abort perfectly good native-text documents.
-    let total_tasks = handles.len();
+    let total_tasks = task_results.len();
     let mut failed_tasks = 0usize;
     let mut failed_sparse_text_page = false;
     let mut first_error: Option<String> = None;
 
-    for (idx, page_number, page_dpi, handle) in handles {
-        let ocr_results: Vec<OcrResult> = match handle.await {
-            Ok(Ok(results)) => results,
-            Ok(Err(e)) => {
-                failed_tasks += 1;
-                failed_sparse_text_page |= page_has_sparse_native_text(&pages[idx]);
-                // Only log the first failure to avoid flooding stderr with an
-                // identical message for every page.
-                if first_error.is_none() {
-                    let msg = e.to_string();
-                    eprintln!("[ocr] failed for page {}: {}", page_number, msg);
-                    first_error = Some(msg);
-                }
-                continue;
-            }
+    for (idx, page_number, page_dpi, result) in task_results {
+        let ocr_results: Vec<OcrResult> = match result {
+            Ok(results) => results,
             Err(e) => {
                 failed_tasks += 1;
                 failed_sparse_text_page |= page_has_sparse_native_text(&pages[idx]);
                 if first_error.is_none() {
                     let msg = e.to_string();
-                    eprintln!("[ocr] task panicked for page {}: {}", page_number, msg);
+                    eprintln!("[ocr] failed for page {}: {}", page_number, msg);
                     first_error = Some(msg);
                 }
                 continue;
