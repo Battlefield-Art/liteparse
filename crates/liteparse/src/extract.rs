@@ -1422,10 +1422,19 @@ fn extract_page_text_items(
     let mut font_space_cal: std::collections::HashMap<String, Vec<f32>> =
         std::collections::HashMap::new();
 
-    // Pre-scan: check if ALL text on this page is invisible (render mode 3).
-    // Some scanned PDFs have an invisible OCR text layer as the only text.
-    // In that case we should use the invisible text rather than skipping it.
-    let skip_invisible = should_skip_invisible(text_page, char_count);
+    // Pre-scan: check if ALL text on this page is invisible (render mode 3)
+    // — some scanned PDFs have an invisible OCR text layer as the only text,
+    // which we should use rather than skip — and detect garbage-CMap fonts.
+    // With the fork's batch API both prescans fold into one chunked pass;
+    // otherwise they each walk the page with per-char FFI calls.
+    let mut char_chunks = CharInfoChunks::new(text_page);
+    let (skip_invisible, garbage_fonts) = match char_chunks.as_mut() {
+        Some(chunks) => prescan_page_batched(chunks, char_count),
+        None => (
+            should_skip_invisible(text_page, char_count),
+            detect_garbage_unicode_fonts(text_page, char_count),
+        ),
+    };
 
     if debug {
         eprintln!("[extract-debug] char_count={char_count}, skip_invisible={skip_invisible}");
@@ -1435,7 +1444,7 @@ fn extract_page_text_items(
     let vp_xform = page.viewport_transform(view_box);
     let mut items: Vec<TextItem> = Vec::new();
     let mut seg = SegmentBuilder::new(emit_word_boxes, extract_text_metadata);
-    let garbage_fonts = detect_garbage_unicode_fonts(text_page, char_count);
+    let mut obj_meta = ObjMetaCache::default();
     let mut glyph_decoder = GlyphDecoder::new(
         std::env::var("LITEPARSE_DEBUG_GLYPH").is_ok(),
         garbage_fonts,
@@ -1444,12 +1453,16 @@ fn extract_page_text_items(
 
     for i in 0..char_count {
         let ch = text_page.char_at_unchecked(i);
-        let unicode = ch.unicode();
-        let is_generated = ch.is_generated();
+        let cv = CharView {
+            ch: &ch,
+            rec: char_chunks.as_mut().and_then(|chunks| chunks.record(i)),
+        };
+        let unicode = cv.unicode();
+        let is_generated = cv.is_generated();
 
         // Skip invisible text (render mode 3) only when the page also has visible text.
         // If all text is invisible, it's likely an OCR text layer and we should keep it.
-        if skip_invisible && ch.text_render_mode() == Some(3) {
+        if skip_invisible && cv.text_render_mode() == Some(3) {
             if debug {
                 let c_display = char::from_u32(unicode).unwrap_or('?');
                 eprintln!(
@@ -1464,7 +1477,7 @@ fn extract_page_text_items(
         let decoded: Option<&str> = if is_generated {
             None
         } else {
-            glyph_decoder.decode(&ch, unicode)
+            glyph_decoder.decode(&cv, unicode)
         };
         // A glyph the decoder recovered (glyph-name / reverse-cmap / outline-hash
         // resolver) carries correct text even though PDFium still reports a
@@ -1521,7 +1534,7 @@ fn extract_page_text_items(
         // Whitespace: mark that we're in a pending-space state while retaining
         // the source character code and PDFium-generated distinction.
         if c.is_whitespace() {
-            seg.mark_pending_space(is_generated, ch.char_code());
+            seg.mark_pending_space(is_generated, cv.char_code());
             // Keep PDFium-generated gaps as item boundaries so the emitted
             // item can retain the same trailing-space-generated distinction
             // as the source extractor. The visible text remains trimmed.
@@ -1542,7 +1555,7 @@ fn extract_page_text_items(
         }
 
         // Get loose bounds in viewport space for the item bounding box
-        let Some(loose_box) = ch.loose_char_box() else {
+        let Some(loose_box) = cv.loose_char_box() else {
             if debug {
                 eprintln!("[extract-debug] i={i} SKIP no loose_char_box char='{c}'");
             }
@@ -1566,17 +1579,11 @@ fn extract_page_text_items(
         }
 
         // Also get strict char box for gap calculation (stays in viewport space)
-        let Some(strict_box) = ch.char_box() else {
+        let Some(strict_rect) = cv.strict_char_box() else {
             if debug {
                 eprintln!("[extract-debug] i={i} SKIP no char_box char='{c}'");
             }
             continue;
-        };
-        let strict_rect = RectF {
-            left: strict_box.left as f32,
-            top: strict_box.top as f32,
-            right: strict_box.right as f32,
-            bottom: strict_box.bottom as f32,
         };
         let vp_strict = vp_xform.transform_bounds(&strict_rect);
 
@@ -1635,7 +1642,11 @@ fn extract_page_text_items(
                     || (seg.pending_space && gap > seg.avg_char_width() * 2.2);
                 let loose_gap = seg.loose_gap_to(&vp_strict, c);
                 let em_vp = (vp_loose.bottom - vp_loose.top).abs();
-                let space_w = ch.font_space_width().map(|w| w * em_vp).unwrap_or(-1.0);
+                let space_w = obj_meta
+                    .meta_for(&ch, cv.text_object())
+                    .font_space_width
+                    .map(|w| w * em_vp)
+                    .unwrap_or(-1.0);
                 eprintln!(
                     "[gap] {} gap={:.2} loose={:.2} sw={:.2} g/sw={:.2} fs={:.2} g/fs={:.2} avgcw={:.2} g/cw={:.2} ps={} -> after='{:.20}' next='{}'",
                     if split { "SPLIT" } else { "merge" },
@@ -1658,13 +1669,15 @@ fn extract_page_text_items(
             }
             if !y_overlap || line_changed || gap >= MAX_INLINE_GAP || dot_leader_break {
                 seg.flush(&mut items);
-                seg.start(c, &vp_loose, &vp_strict, &ch, recovered, page_rotation);
+                let meta = obj_meta.meta_for(&ch, cv.text_object());
+                seg.start(c, &vp_loose, &vp_strict, &cv, recovered, page_rotation, &meta);
                 seg.append_ligature_tail(ligature_tail);
             } else if seg.pending_space {
                 let avg_cw = seg.avg_char_width();
                 if gap > avg_cw * 2.2 {
                     seg.flush(&mut items);
-                    seg.start(c, &vp_loose, &vp_strict, &ch, recovered, page_rotation);
+                    let meta = obj_meta.meta_for(&ch, cv.text_object());
+                    seg.start(c, &vp_loose, &vp_strict, &cv, recovered, page_rotation, &meta);
                     seg.append_ligature_tail(ligature_tail);
                 } else {
                     // Genuine inline space PDFium emitted: sample its size
@@ -1688,7 +1701,7 @@ fn extract_page_text_items(
                         }
                     }
                     seg.commit_pending_space();
-                    seg.push_char(c, &vp_loose, &vp_strict, &ch, recovered);
+                    seg.push_char(c, &vp_loose, &vp_strict, &cv, recovered);
                     seg.append_ligature_tail(ligature_tail);
                 }
             } else {
@@ -1702,7 +1715,11 @@ fn extract_page_text_items(
                 // metric (common in embedded subset fonts) fall back to a fraction
                 // of the rendered em height as the space estimate.
                 let em_vp = (vp_loose.bottom - vp_loose.top).abs();
-                let space_w = ch.font_space_width().map(|w| w * em_vp).unwrap_or(0.0);
+                let space_w = obj_meta
+                    .meta_for(&ch, cv.text_object())
+                    .font_space_width
+                    .map(|w| w * em_vp)
+                    .unwrap_or(0.0);
                 let loose_gap = seg.loose_gap_to(&vp_strict, c);
                 let both_alnum = c.is_ascii_alphanumeric()
                     && seg
@@ -1731,11 +1748,12 @@ fn extract_page_text_items(
                     seg.text.push(' ');
                     seg.break_word();
                 }
-                seg.push_char(c, &vp_loose, &vp_strict, &ch, recovered);
+                seg.push_char(c, &vp_loose, &vp_strict, &cv, recovered);
                 seg.append_ligature_tail(ligature_tail);
             }
         } else {
-            seg.start(c, &vp_loose, &vp_strict, &ch, recovered, page_rotation);
+            let meta = obj_meta.meta_for(&ch, cv.text_object());
+            seg.start(c, &vp_loose, &vp_strict, &cv, recovered, page_rotation, &meta);
             seg.append_ligature_tail(ligature_tail);
         }
     }
@@ -2185,12 +2203,12 @@ impl<'a> GlyphDecoder<'a> {
     /// Returns replacement text for this char when its glyph name resolves
     /// and the current unicode is suspicious (control/PUA/sentinel/map-error)
     /// or the font's unicode mapping is untrusted altogether.
-    fn decode(&mut self, ch: &pdfium::TextChar, unicode: u32) -> Option<&str> {
+    fn decode(&mut self, cv: &CharView<'_, '_>, unicode: u32) -> Option<&str> {
         let cheap_suspicious = matches!(unicode, 0 | 0xFFFE | 0xFFFF)
             || (unicode < 0x20 && !matches!(unicode, 0x09 | 0x0A | 0x0D))
             || (0xE000..=0xF8FF).contains(&unicode);
 
-        let obj_ptr = ch.text_object()?;
+        let obj_ptr = cv.text_object()?;
         let obj = obj_ptr as usize;
         let key = if obj == self.last_obj {
             self.last_key
@@ -2253,13 +2271,13 @@ impl<'a> GlyphDecoder<'a> {
 
         // map-error FFI check is the expensive part of "suspicious"; only
         // consult it when the cheap checks and font trust don't decide.
-        if !info.untrusted && !cheap_suspicious && !ch.has_unicode_map_error() {
+        if !info.untrusted && !cheap_suspicious && !cv.has_unicode_map_error() {
             return None;
         }
         let debug = self.debug;
         let resolver = self.resolver;
 
-        let char_code = ch.char_code();
+        let char_code = cv.char_code();
         let encoding_lies = info.encoding_lies;
         let FontGlyphInfo {
             font,
@@ -2363,6 +2381,13 @@ impl<'a> GlyphDecoder<'a> {
     }
 }
 
+/// Control/PUA/sentinel codepoints that signal a garbage /ToUnicode mapping.
+fn is_suspicious_unicode(unicode: u32) -> bool {
+    matches!(unicode, 0 | 0xFFFE | 0xFFFF)
+        || unicode < 0x20
+        || (0xE000..=0xF8FF).contains(&unicode)
+}
+
 /// Prescan: flag fonts whose /ToUnicode maps a high fraction of chars into
 /// control/PUA/sentinel codepoints — a structurally present but garbage CMap
 /// (e.g. `text_simple__spd`). Chars from flagged fonts get glyph-name /
@@ -2371,6 +2396,20 @@ fn detect_garbage_unicode_fonts(
     text_page: &TextPage,
     char_count: i32,
 ) -> std::collections::HashSet<usize> {
+    // Cheap gate: a font is only flagged when some of its chars map into
+    // suspicious codepoints, so a page with no suspicious unicode at all (the
+    // overwhelmingly common case) can skip the per-char text-object and font
+    // resolution below — one FFI call per char instead of three. The gate
+    // scans all chars (a superset of what the counting pass considers), so an
+    // all-clear here is an all-clear for the full pass.
+    let any_suspicious = (0..char_count).any(|i| {
+        let unicode = text_page.char_at_unchecked(i).unicode();
+        !matches!(unicode, 0x09 | 0x0A | 0x0D | 0x20) && is_suspicious_unicode(unicode)
+    });
+    if !any_suspicious {
+        return std::collections::HashSet::new();
+    }
+
     let mut counts: std::collections::HashMap<usize, (u32, u32)> = std::collections::HashMap::new();
     let mut last_obj: usize = 0;
     let mut last_key: usize = 0;
@@ -2399,10 +2438,7 @@ fn detect_garbage_unicode_fonts(
         };
         let entry = counts.entry(key).or_insert((0, 0));
         entry.0 += 1;
-        let suspicious = matches!(unicode, 0 | 0xFFFE | 0xFFFF)
-            || unicode < 0x20
-            || (0xE000..=0xF8FF).contains(&unicode);
-        if suspicious {
+        if is_suspicious_unicode(unicode) {
             entry.1 += 1;
         }
     }
@@ -2418,6 +2454,391 @@ fn detect_garbage_unicode_fonts(
 /// `flush`).
 fn counts_as_unmapped(recovered: bool, raw_map_error: bool) -> bool {
     !recovered && raw_map_error
+}
+
+/// Text metadata that is constant across one text object, captured once and
+/// reused by every segment that starts inside it. Nearly all of
+/// [`SegmentBuilder::start`]'s FFI round-trips and string allocations resolve
+/// per-object or per-font constants; on dense pages (hundreds of thousands of
+/// tiny text objects sharing a handful of fonts) re-deriving them at every
+/// segment start dominated extraction time.
+struct ObjTextMeta {
+    font_name: Option<String>,
+    font_flags: Option<i32>,
+    font_weight: Option<i32>,
+    /// Raw pdfium font size for the object; <= 0 means "unavailable" and the
+    /// segment falls back to its loose-box height (resolved in `start`).
+    font_size: f32,
+    /// Ascent/descent at `font_size`. None when the font is missing or
+    /// `font_size <= 0` (that case is recomputed per segment against the
+    /// fallback size).
+    font_ascent: Option<f32>,
+    font_descent: Option<f32>,
+    /// Vertical scale of the char matrix (font_height = font_size * scale_y).
+    scale_y: Option<f32>,
+    /// Mirrors the pre-cache logic: only probed when the font has a base
+    /// name, false otherwise.
+    font_is_embedded: bool,
+    /// Buggy-by-name verdict (embedded + known-bad name/type). Per-char buggy
+    /// codepoint checks still run in the segment.
+    font_name_is_buggy: bool,
+    font: Option<Font>,
+    fill_color: Option<String>,
+    stroke_color: Option<String>,
+    mcid: Option<i32>,
+    /// Advance width of the ASCII space in this object's font, per em
+    /// (mirrors [`pdfium::TextChar::font_space_width`]).
+    font_space_width: Option<f32>,
+}
+
+/// Font-level constants shared by every text object using the same font,
+/// keyed by `FPDF_FONT` handle.
+struct FontMeta {
+    base_name: Option<String>,
+    /// Name/flags from `FPDFText_GetFontInfo`; the name is only used when the
+    /// font exposes no base name.
+    info_name: Option<String>,
+    flags: Option<i32>,
+    weight: Option<i32>,
+    is_embedded: bool,
+    name_is_buggy: bool,
+    space_width_per_em: Option<f32>,
+}
+
+#[derive(Default)]
+struct ObjMetaCache {
+    last_obj: usize,
+    last: Option<std::rc::Rc<ObjTextMeta>>,
+    fonts: std::collections::HashMap<usize, FontMeta>,
+    /// (font handle, font_size bits) -> (ascent, descent).
+    metrics: std::collections::HashMap<(usize, u32), (Option<f32>, Option<f32>)>,
+    /// Packed ARGB -> hex string, shared across objects.
+    colors: std::collections::HashMap<u32, String>,
+}
+
+impl ObjMetaCache {
+    /// `obj_ptr` is the char's text object (from [`CharView::text_object`]),
+    /// passed in so the batch path avoids the per-char FFI lookup.
+    fn meta_for(
+        &mut self,
+        ch: &pdfium::TextChar,
+        obj_ptr: Option<pdfium::pdfium_sys::FPDF_PAGEOBJECT>,
+    ) -> std::rc::Rc<ObjTextMeta> {
+        let key = obj_ptr.map_or(0, |p| p as usize);
+        if key != 0
+            && key == self.last_obj
+            && let Some(meta) = &self.last
+        {
+            return std::rc::Rc::clone(meta);
+        }
+        let meta = std::rc::Rc::new(self.build(ch, obj_ptr));
+        self.last_obj = key;
+        self.last = Some(std::rc::Rc::clone(&meta));
+        meta
+    }
+
+    fn hex(&mut self, c: &pdfium::Color) -> String {
+        let key = u32::from_be_bytes([c.a, c.r, c.g, c.b]);
+        self.colors
+            .entry(key)
+            .or_insert_with(|| color_to_argb_hex(c))
+            .clone()
+    }
+
+    fn build(
+        &mut self,
+        ch: &pdfium::TextChar,
+        obj_ptr: Option<pdfium::pdfium_sys::FPDF_PAGEOBJECT>,
+    ) -> ObjTextMeta {
+        let font = obj_ptr.and_then(|obj| unsafe { Font::from_text_object(obj) });
+        let fs = ch.font_size() as f32;
+        let mut font_name = None;
+        let mut font_flags = None;
+        let font_weight;
+        let font_space_width;
+        let mut font_is_embedded = false;
+        let mut font_name_is_buggy = false;
+        let mut font_ascent = None;
+        let mut font_descent = None;
+        match &font {
+            Some(f) => {
+                let handle = f.handle() as usize;
+                let fm = self.fonts.entry(handle).or_insert_with(|| {
+                    let base_name = f.base_name();
+                    let (is_embedded, name_is_buggy) = match &base_name {
+                        Some(name) => {
+                            let embedded = f.is_embedded();
+                            (embedded, embedded && is_buggy_font(name, f.font_type()))
+                        }
+                        None => (false, false),
+                    };
+                    let (info_name, flags) = match ch.font_info() {
+                        Some((name, flags)) => (Some(name), Some(flags)),
+                        None => (None, None),
+                    };
+                    let weight = ch.font_weight();
+                    // Same probe order as `TextChar::font_space_width`.
+                    let space_width_per_em = f
+                        .glyph_width_from_char_code(0x20, 1.0)
+                        .filter(|w| *w > 0.0)
+                        .or_else(|| f.glyph_width(0x20, 1.0).filter(|w| *w > 0.0));
+                    FontMeta {
+                        base_name,
+                        info_name,
+                        flags,
+                        weight: (weight > 0).then_some(weight),
+                        is_embedded,
+                        name_is_buggy,
+                        space_width_per_em,
+                    }
+                });
+                font_name = fm.base_name.clone().or_else(|| fm.info_name.clone());
+                font_flags = fm.flags;
+                font_weight = fm.weight;
+                font_is_embedded = fm.is_embedded;
+                font_name_is_buggy = fm.name_is_buggy;
+                font_space_width = fm.space_width_per_em;
+                if fs > 0.0 {
+                    let (ascent, descent) = *self
+                        .metrics
+                        .entry((handle, fs.to_bits()))
+                        .or_insert_with(|| (f.ascent(fs), f.descent(fs)));
+                    font_ascent = ascent;
+                    font_descent = descent;
+                }
+            }
+            None => {
+                if let Some((name, flags)) = ch.font_info() {
+                    font_name = Some(name);
+                    font_flags = Some(flags);
+                }
+                let weight = ch.font_weight();
+                font_weight = (weight > 0).then_some(weight);
+                font_space_width = None;
+            }
+        }
+        let scale_y = if obj_ptr.is_some() {
+            ch.matrix().map(|m| decompose_scale(&m).1)
+        } else {
+            None
+        };
+        let stroke_color = ch.stroke_color().map(|c| self.hex(&c));
+        let fill_color = ch.fill_color().map(|c| self.hex(&c));
+        ObjTextMeta {
+            font_name,
+            font_flags,
+            font_weight,
+            font_size: fs,
+            font_ascent,
+            font_descent,
+            scale_y,
+            font_is_embedded,
+            font_name_is_buggy,
+            font,
+            fill_color,
+            stroke_color,
+            mcid: ch.marked_content_id(),
+            font_space_width,
+        }
+    }
+}
+
+/// Raw `CPDF_TextPage::CharType` values surfaced by the fork's batched
+/// char-info records (`FPDF_CHARINFO_LP::char_type`).
+const CHAR_TYPE_GENERATED: i32 = 1;
+const CHAR_TYPE_NOT_UNICODE: i32 = 2;
+
+/// Records per `FPDFText_GetCharInfoBatch` call (80 bytes each → ~1.3 MB).
+const CHAR_INFO_CHUNK: usize = 16 * 1024;
+
+/// Chunked reader over the fork's batched char-info API (chromium/8028+).
+/// `new` returns None when the loaded pdfium predates the API; callers then
+/// fall back to the per-character FFI getters.
+struct CharInfoChunks<'a, 'page, 'lib: 'page> {
+    text_page: &'a TextPage<'page, 'lib>,
+    buf: Vec<pdfium::pdfium_sys::FPDF_CHARINFO_LP>,
+    /// Absolute char index of `buf[0]`.
+    start: i32,
+}
+
+impl<'a, 'page, 'lib: 'page> CharInfoChunks<'a, 'page, 'lib> {
+    fn new(text_page: &'a TextPage<'page, 'lib>) -> Option<Self> {
+        // Empty-buffer call probes symbol support without reading records.
+        text_page.char_infos_batch(0, &mut [])?;
+        Some(Self {
+            text_page,
+            buf: Vec::new(),
+            start: 0,
+        })
+    }
+
+    /// Record for absolute char index `i` (must be within the page's char
+    /// count), refilling the chunk buffer on demand. Returns None only if
+    /// the batch call unexpectedly comes back empty for a valid index.
+    fn record(&mut self, i: i32) -> Option<pdfium::pdfium_sys::FPDF_CHARINFO_LP> {
+        let off = i - self.start;
+        if off < 0 || off as usize >= self.buf.len() {
+            self.buf.resize(CHAR_INFO_CHUNK, Default::default());
+            let written = self.text_page.char_infos_batch(i, &mut self.buf).unwrap_or(0);
+            self.buf.truncate(written);
+            self.start = i;
+        }
+        self.buf.get((i - self.start) as usize).copied()
+    }
+}
+
+/// Per-character accessor that reads from a batched record when available
+/// and falls back to the per-character FFI getters otherwise. Method
+/// semantics mirror the corresponding [`pdfium::TextChar`] methods exactly.
+struct CharView<'a, 'tp> {
+    ch: &'a pdfium::TextChar<'tp>,
+    rec: Option<pdfium::pdfium_sys::FPDF_CHARINFO_LP>,
+}
+
+impl CharView<'_, '_> {
+    fn unicode(&self) -> u32 {
+        match &self.rec {
+            Some(rec) => rec.unicode,
+            None => self.ch.unicode(),
+        }
+    }
+
+    fn char_code(&self) -> u32 {
+        match &self.rec {
+            Some(rec) => rec.char_code,
+            None => self.ch.char_code(),
+        }
+    }
+
+    fn is_generated(&self) -> bool {
+        match &self.rec {
+            Some(rec) => rec.char_type == CHAR_TYPE_GENERATED,
+            None => self.ch.is_generated(),
+        }
+    }
+
+    fn has_unicode_map_error(&self) -> bool {
+        match &self.rec {
+            Some(rec) => rec.char_type == CHAR_TYPE_NOT_UNICODE,
+            None => self.ch.has_unicode_map_error(),
+        }
+    }
+
+    fn text_render_mode(&self) -> Option<i32> {
+        match &self.rec {
+            Some(rec) => (rec.text_render_mode >= 0).then_some(rec.text_render_mode),
+            None => self.ch.text_render_mode(),
+        }
+    }
+
+    fn text_object(&self) -> Option<pdfium::pdfium_sys::FPDF_PAGEOBJECT> {
+        match &self.rec {
+            Some(rec) => (!rec.text_object.is_null()).then_some(rec.text_object),
+            None => self.ch.text_object(),
+        }
+    }
+
+    fn loose_char_box(&self) -> Option<RectF> {
+        match &self.rec {
+            Some(rec) => Some(RectF {
+                left: rec.loose_box.left,
+                top: rec.loose_box.top,
+                right: rec.loose_box.right,
+                bottom: rec.loose_box.bottom,
+            }),
+            None => self.ch.loose_char_box(),
+        }
+    }
+
+    /// Strict char box as an f32 rect (page space).
+    fn strict_char_box(&self) -> Option<RectF> {
+        match &self.rec {
+            Some(rec) => Some(RectF {
+                left: rec.left as f32,
+                top: rec.top as f32,
+                right: rec.right as f32,
+                bottom: rec.bottom as f32,
+            }),
+            None => self.ch.char_box().map(|b| RectF {
+                left: b.left as f32,
+                top: b.top as f32,
+                right: b.right as f32,
+                bottom: b.bottom as f32,
+            }),
+        }
+    }
+}
+
+/// One chunked pass computing both [`should_skip_invisible`] and
+/// [`detect_garbage_unicode_fonts`] from batched records. Must mirror those
+/// functions' logic exactly — they remain the behavior reference (and the
+/// live path) for pdfium builds without the batch API.
+fn prescan_page_batched(
+    chunks: &mut CharInfoChunks<'_, '_, '_>,
+    char_count: i32,
+) -> (bool, std::collections::HashSet<usize>) {
+    let mut visible = 0u32;
+    let mut invisible = 0u32;
+    let mut counts: std::collections::HashMap<usize, (u32, u32)> = std::collections::HashMap::new();
+    let mut last_obj: usize = 0;
+    let mut last_key: usize = 0;
+
+    for i in 0..char_count {
+        let Some(rec) = chunks.record(i) else {
+            continue;
+        };
+        let unicode = rec.unicode;
+        let generated = rec.char_type == CHAR_TYPE_GENERATED;
+
+        // Visible/invisible tally (mirrors `should_skip_invisible`).
+        if !matches!(unicode, 0 | 0xFFFE | 0xFFFF) {
+            let ws_or_ctrl = char::from_u32(unicode)
+                .is_some_and(|c| c.is_whitespace() || c.is_control());
+            if !ws_or_ctrl && !generated {
+                if rec.text_render_mode == 3 {
+                    invisible += 1;
+                } else {
+                    visible += 1;
+                }
+            }
+        }
+
+        // Garbage-font tally (mirrors `detect_garbage_unicode_fonts`).
+        if generated || matches!(unicode, 0x09 | 0x0A | 0x0D | 0x20) {
+            continue;
+        }
+        if rec.text_object.is_null() {
+            continue;
+        }
+        let obj = rec.text_object as usize;
+        let key = if obj == last_obj {
+            last_key
+        } else {
+            let Some(font) = (unsafe { Font::from_text_object(rec.text_object) }) else {
+                continue;
+            };
+            last_obj = obj;
+            last_key = font.handle() as usize;
+            last_key
+        };
+        let entry = counts.entry(key).or_insert((0, 0));
+        entry.0 += 1;
+        if is_suspicious_unicode(unicode) {
+            entry.1 += 1;
+        }
+    }
+
+    let skip_invisible = if visible == 0 || invisible == 0 {
+        false
+    } else {
+        (invisible as f64 / (visible + invisible) as f64) < 0.3
+    };
+    let garbage_fonts = counts
+        .into_iter()
+        .filter(|&(_, (total, suspicious))| total >= 20 && suspicious * 10 >= total)
+        .map(|(key, _)| key)
+        .collect();
+    (skip_invisible, garbage_fonts)
 }
 
 /// Accumulates characters into a single TextItem segment.
@@ -2633,15 +3054,18 @@ impl SegmentBuilder {
         }
     }
 
-    /// Start a new segment with the given character.
+    /// Start a new segment with the given character. `meta` carries the
+    /// object/font-level metadata for the character's text object (see
+    /// [`ObjMetaCache`]); only per-character values are read from `cv`.
     fn start(
         &mut self,
         c: char,
         vp_loose: &RectF,
         vp_strict: &RectF,
-        ch: &pdfium::TextChar,
+        cv: &CharView<'_, '_>,
         recovered: bool,
         page_rotation: i32,
+        meta: &ObjTextMeta,
     ) {
         self.text.clear();
         self.text.push(c);
@@ -2657,7 +3081,7 @@ impl SegmentBuilder {
         self.dir_rtl = None;
         self.note_direction(c);
         self.char_count = 1;
-        self.unmapped_char_count = if counts_as_unmapped(recovered, ch.has_unicode_map_error()) {
+        self.unmapped_char_count = if counts_as_unmapped(recovered, cv.has_unicode_map_error()) {
             1
         } else {
             0
@@ -2674,35 +3098,27 @@ impl SegmentBuilder {
         self.text_width = 0.0;
         if self.extract_text_metadata {
             self.char_codes.clear();
-            self.char_codes.push(ch.char_code());
+            self.char_codes.push(cv.char_code());
         }
         self.font_is_buggy = false;
         self.font_is_embedded = false;
         self.font = None;
 
-        // Font info
-        if let Some((name, flags)) = ch.font_info() {
-            self.font_name = Some(name);
-            self.font_flags = Some(flags);
-        } else {
-            self.font_name = None;
-            self.font_flags = None;
-        }
+        // Font info (object/font-level, precomputed in `meta`)
+        self.font_name = meta.font_name.clone();
+        self.font_flags = meta.font_flags;
 
-        let fs = ch.font_size() as f32;
+        let fs = meta.font_size;
         self.font_size = if fs > 0.0 {
             fs
         } else {
             (vp_loose.bottom - vp_loose.top).abs()
         };
 
-        self.font_weight = {
-            let w = ch.font_weight();
-            if w > 0 { Some(w) } else { None }
-        };
+        self.font_weight = meta.font_weight;
 
         // Angle adjusted for page rotation
-        let angle_rad = ch.angle();
+        let angle_rad = cv.ch.angle();
         self.rotation_deg = if angle_rad >= 0.0 {
             adjust_angle_for_rotation(angle_rad, page_rotation).to_degrees()
         } else {
@@ -2710,47 +3126,45 @@ impl SegmentBuilder {
         };
 
         // Font object for ascent/descent/glyph widths/buggy detection
-        if let Some(obj) = ch.text_object() {
-            if let Some(font) = unsafe { Font::from_text_object(obj) } {
-                if let Some(name) = font.base_name() {
-                    let ft = font.font_type();
-                    self.font_is_embedded = font.is_embedded();
+        if let Some(font) = &meta.font {
+            self.font_is_embedded = meta.font_is_embedded;
+            if meta.font_name_is_buggy {
+                self.font_is_buggy = true;
+            }
 
-                    if self.font_is_embedded && is_buggy_font(&name, ft) {
-                        self.font_is_buggy = true;
-                    }
-
-                    self.font_name = Some(name);
-                }
-
+            if fs > 0.0 {
+                self.font_ascent = meta.font_ascent;
+                self.font_descent = meta.font_descent;
+            } else {
+                // Metrics scale with the effective size, which fell back to
+                // this segment's loose-box height above.
                 self.font_ascent = font.ascent(self.font_size);
                 self.font_descent = font.descent(self.font_size);
-
-                // Glyph width for first char
-                let char_code = ch.char_code();
-                if let Some(w) = font.glyph_width_from_char_code(char_code, self.font_size) {
-                    self.text_width += w;
-                }
-
-                self.font = Some(font);
             }
 
-            // fontHeight = fontSize * scaleY
-            if let Some(matrix) = ch.matrix() {
-                let (_sx, sy) = decompose_scale(&matrix);
-                self.font_height = Some(self.font_size * sy);
+            // Glyph width for first char
+            let char_code = cv.char_code();
+            if let Some(w) = font.glyph_width_from_char_code(char_code, self.font_size) {
+                self.text_width += w;
             }
+
+            self.font = Some(font.clone());
+        }
+
+        // fontHeight = fontSize * scaleY
+        if let Some(sy) = meta.scale_y {
+            self.font_height = Some(self.font_size * sy);
         }
 
         // Colors from first glyph
-        self.stroke_color = ch.stroke_color().map(|c| color_to_argb_hex(&c));
-        self.fill_color = ch.fill_color().map(|c| color_to_argb_hex(&c));
+        self.stroke_color = meta.stroke_color.clone();
+        self.fill_color = meta.fill_color.clone();
 
         // Marked content from first glyph
-        self.mcid = ch.marked_content_id();
+        self.mcid = meta.mcid;
 
         // Check codepoint for buggy encoding
-        let unicode = ch.unicode();
+        let unicode = cv.unicode();
         if !self.font_is_buggy && self.font_is_embedded && is_buggy_codepoint(unicode) {
             self.font_is_buggy = true;
         }
@@ -2762,7 +3176,7 @@ impl SegmentBuilder {
         c: char,
         vp_loose: &RectF,
         vp_strict: &RectF,
-        ch: &pdfium::TextChar,
+        cv: &CharView<'_, '_>,
         recovered: bool,
     ) {
         self.text.push(c);
@@ -2779,17 +3193,17 @@ impl SegmentBuilder {
         self.note_direction(c);
         self.char_count += 1;
         if self.extract_text_metadata {
-            self.char_codes.push(ch.char_code());
+            self.char_codes.push(cv.char_code());
         }
-        if counts_as_unmapped(recovered, ch.has_unicode_map_error()) {
+        if counts_as_unmapped(recovered, cv.has_unicode_map_error()) {
             self.unmapped_char_count += 1;
         }
 
         // Accumulate glyph width
         if let Some(ref font) = self.font {
-            let char_code = ch.char_code();
-            if ch.is_generated() {
-                if let Some(w) = font.glyph_width(ch.unicode(), self.font_size) {
+            let char_code = cv.char_code();
+            if cv.is_generated() {
+                if let Some(w) = font.glyph_width(cv.unicode(), self.font_size) {
                     self.text_width += w;
                 }
             } else if let Some(w) = font.glyph_width_from_char_code(char_code, self.font_size) {
@@ -2799,7 +3213,7 @@ impl SegmentBuilder {
 
         // Check codepoint for buggy encoding on subsequent chars
         if !self.font_is_buggy && self.font_is_embedded {
-            let unicode = ch.unicode();
+            let unicode = cv.unicode();
             if is_buggy_codepoint(unicode) {
                 self.font_is_buggy = true;
             }
