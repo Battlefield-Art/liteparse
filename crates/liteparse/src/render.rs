@@ -1,5 +1,6 @@
+use crate::config::PageOrientationCorrection;
 use crate::error::LiteParseError;
-use crate::extract::{encode_png, load_document_from_input};
+use crate::extract::{apply_page_orientation_corrections, encode_png, load_document_from_input};
 use crate::types::{PdfInput, ScreenshotRect};
 use pdfium::Library;
 use serde::Serialize;
@@ -44,9 +45,11 @@ pub fn render_pages_to_png(
     password: Option<&str>,
     detect_rects: bool,
     render_form_fields: bool,
+    page_orientation_corrections: &[PageOrientationCorrection],
 ) -> Result<Vec<RenderedPage>, LiteParseError> {
     let lib = Library::init();
     let document = load_document_from_input(&lib, input, password)?;
+    apply_page_orientation_corrections(&document, page_orientation_corrections)?;
     render_document_pages(
         &document,
         page_numbers,
@@ -278,7 +281,7 @@ pub fn screenshot(
     password: Option<&str>,
 ) -> Result<(), LiteParseError> {
     let input = PdfInput::Path(pdf_path.to_string());
-    let pages = render_pages_to_png(&input, Some(&[page_num]), dpi, password, false, false)?;
+    let pages = render_pages_to_png(&input, Some(&[page_num]), dpi, password, false, false, &[])?;
     let page = pages
         .into_iter()
         .next()

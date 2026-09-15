@@ -269,8 +269,20 @@ impl<'doc, 'lib: 'doc> Page<'doc, 'lib> {
         self.user_unit
     }
 
+    /// The page's `/Rotate` in quarter turns clockwise (0..=3), as PDFium
+    /// reports it.
     pub fn rotation(&self) -> i32 {
         unsafe { ffi!(FPDFPage_GetRotation(self.handle)) }
+    }
+
+    /// Overwrite the page's `/Rotate` with `quarter_turns` (0..=3, clockwise
+    /// when displayed). PDFium writes the value into the page dictionary and
+    /// recomputes the page size, so [`Self::width`] / [`Self::height`], the
+    /// viewport mapping, and every later `FPDF_LoadPage` of this page in the
+    /// same document see the new rotation. Values outside 0..=3 are ignored
+    /// by PDFium.
+    pub fn set_rotation(&self, quarter_turns: i32) {
+        unsafe { ffi!(FPDFPage_SetRotation(self.handle, quarter_turns)) }
     }
 
     /// Replace the page's `/CropBox` (PDF user space, points, bottom-left origin).

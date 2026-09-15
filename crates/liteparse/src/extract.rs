@@ -39,6 +39,37 @@ pub(crate) fn load_document_from_input<'lib>(
     }
 }
 
+/// Rewrite `/Rotate` on every page named in `corrections` so its content
+/// reads upright (see `LiteParseConfig::page_orientation_corrections`).
+///
+/// PDFium stores the new rotation in the page dictionary of the open
+/// document, so it survives every later `FPDF_LoadPage` of that page: text
+/// extraction, OCR rasters and screenshots all see the corrected page without
+/// any further plumbing. It does NOT survive reopening the input, which is why
+/// every document open in `parser.rs` goes through
+/// `LiteParse::open_document` rather than this crate's raw loader.
+///
+/// Pages past the end of the document are skipped: a caller that parses a
+/// page slice (`target_pages`) may hand over corrections for the whole
+/// document. A non-cardinal angle is a config error.
+pub(crate) fn apply_page_orientation_corrections(
+    document: &Document,
+    corrections: &[crate::config::PageOrientationCorrection],
+) -> Result<(), LiteParseError> {
+    let page_count = document.page_count().max(0) as u32;
+    for correction in corrections {
+        let quarter_turns = correction
+            .quarter_turns_to_apply()
+            .map_err(LiteParseError::Config)?;
+        if quarter_turns == 0 || correction.page == 0 || correction.page > page_count {
+            continue;
+        }
+        let page = document.page((correction.page - 1) as i32)?;
+        page.set_rotation((page.rotation() + quarter_turns).rem_euclid(4));
+    }
+    Ok(())
+}
+
 /// Extract pages from a `PdfInput` (file path or bytes) with filtering.
 ///
 /// This convenience entry point acquires the PDFium lock internally for the
