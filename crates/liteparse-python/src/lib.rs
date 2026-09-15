@@ -3,7 +3,9 @@ use std::collections::HashMap;
 use pyo3::prelude::*;
 use pyo3::types::PyBytes;
 
-use liteparse::config::{CropBox, ImageMode, LiteParseConfig, OutputFormat};
+use liteparse::config::{
+    CropBox, ImageMode, LiteParseConfig, OutputFormat, PageOrientationCorrection,
+};
 use liteparse::types::PdfInput;
 
 mod cli;
@@ -1265,6 +1267,8 @@ struct PyLiteParseConfig {
     #[pyo3(get)]
     skip_diagonal_text: bool,
     #[pyo3(get)]
+    page_orientation_corrections: Vec<(u32, u16)>,
+    #[pyo3(get)]
     include_complexity: bool,
     #[pyo3(get)]
     extract_text_metadata: bool,
@@ -1336,6 +1340,11 @@ impl PyLiteParseConfig {
                 .as_ref()
                 .map(|c| (c.top, c.right, c.bottom, c.left)),
             skip_diagonal_text: cfg.skip_diagonal_text,
+            page_orientation_corrections: cfg
+                .page_orientation_corrections
+                .iter()
+                .map(|c| (c.page, c.angle))
+                .collect(),
             include_complexity: cfg.include_complexity,
             extract_text_metadata: cfg.extract_text_metadata,
             image_output_dir: cfg.image_output_dir.clone(),
@@ -1466,6 +1475,7 @@ impl LiteParse {
         extract_text_metadata = None,
         crop_box = None,
         skip_diagonal_text = None,
+        page_orientation_corrections = None,
         include_complexity = None,
         extract_vector_graphics = None,
     ))]
@@ -1505,6 +1515,7 @@ impl LiteParse {
         extract_text_metadata: Option<bool>,
         crop_box: Option<(f32, f32, f32, f32)>,
         skip_diagonal_text: Option<bool>,
+        page_orientation_corrections: Option<Vec<(u32, u16)>>,
         include_complexity: Option<bool>,
         extract_vector_graphics: Option<bool>,
     ) -> PyResult<Self> {
@@ -1626,6 +1637,12 @@ impl LiteParse {
         }
         if let Some(v) = skip_diagonal_text {
             cfg.skip_diagonal_text = v;
+        }
+        if let Some(v) = page_orientation_corrections {
+            cfg.page_orientation_corrections = v
+                .into_iter()
+                .map(|(page, angle)| PageOrientationCorrection { page, angle })
+                .collect();
         }
         if let Some(v) = include_complexity {
             cfg.include_complexity = v;

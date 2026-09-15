@@ -1073,3 +1073,127 @@ fn raw_text_diagonal_grounding_bounds_follow_the_glyph_outlines() {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// page_orientation_corrections
+//
+// `sample_rotated_180.pdf` / `sample_rotated_90cw.pdf` are `sample.pdf` with
+// a `/Rotate` applied via `qpdf --rotate`, so their content *appears* rotated
+// in the viewport exactly the way a scanned upside-down / sideways page would
+// to an orientation classifier. A correction equal to that apparent rotation
+// must give back the upright parse.
+// ---------------------------------------------------------------------------
+
+fn text_only_parser(corrections: Vec<liteparse::config::PageOrientationCorrection>) -> LiteParse {
+    LiteParse::new(LiteParseConfig {
+        ocr_enabled: false,
+        quiet: true,
+        page_orientation_corrections: corrections,
+        ..LiteParseConfig::default()
+    })
+}
+
+fn correction(page: u32, angle: u16) -> liteparse::config::PageOrientationCorrection {
+    liteparse::config::PageOrientationCorrection { page, angle }
+}
+
+#[tokio::test]
+async fn test_rotated_fixture_reads_wrong_without_correction() {
+    let upright = text_only_parser(vec![])
+        .parse("../../integration_tests_data/sample.pdf")
+        .await
+        .unwrap();
+    let rotated = text_only_parser(vec![])
+        .parse("../../integration_tests_data/sample_rotated_180.pdf")
+        .await
+        .unwrap();
+    assert_ne!(
+        upright.pages[0].text, rotated.pages[0].text,
+        "fixture is not actually inverted; the correction test below would be vacuous"
+    );
+}
+
+#[tokio::test]
+async fn test_orientation_correction_180_restores_upright_parse() {
+    let upright = text_only_parser(vec![])
+        .parse("../../integration_tests_data/sample.pdf")
+        .await
+        .unwrap();
+    let corrected = text_only_parser(vec![correction(1, 180)])
+        .parse("../../integration_tests_data/sample_rotated_180.pdf")
+        .await
+        .unwrap();
+    assert_eq!(corrected.pages[0].text, upright.pages[0].text);
+    assert_eq!(corrected.pages[0].page_width, upright.pages[0].page_width);
+    assert_eq!(corrected.pages[0].page_height, upright.pages[0].page_height);
+}
+
+#[tokio::test]
+async fn test_orientation_correction_90_restores_upright_parse() {
+    let upright = text_only_parser(vec![])
+        .parse("../../integration_tests_data/sample.pdf")
+        .await
+        .unwrap();
+    // `--rotate=+90` displays the page turned 90° clockwise, so the content
+    // appears rotated 90° clockwise: the correction angle is 90.
+    let corrected = text_only_parser(vec![correction(1, 90)])
+        .parse("../../integration_tests_data/sample_rotated_90cw.pdf")
+        .await
+        .unwrap();
+    assert_eq!(corrected.pages[0].text, upright.pages[0].text);
+    assert_eq!(corrected.pages[0].page_width, upright.pages[0].page_width);
+    assert_eq!(corrected.pages[0].page_height, upright.pages[0].page_height);
+}
+
+#[tokio::test]
+async fn test_orientation_correction_applies_to_screenshots() {
+    let upright = LiteParse::new(LiteParseConfig {
+        ocr_enabled: false,
+        quiet: true,
+        ..LiteParseConfig::default()
+    })
+    .screenshot("../../integration_tests_data/sample.pdf", None)
+    .await
+    .unwrap();
+    let corrected = LiteParse::new(LiteParseConfig {
+        ocr_enabled: false,
+        quiet: true,
+        page_orientation_corrections: vec![correction(1, 90)],
+        ..LiteParseConfig::default()
+    })
+    .screenshot("../../integration_tests_data/sample_rotated_90cw.pdf", None)
+    .await
+    .unwrap();
+    // A sideways page renders landscape; the correction must turn it back.
+    assert_eq!(
+        (corrected[0].width, corrected[0].height),
+        (upright[0].width, upright[0].height)
+    );
+}
+
+#[tokio::test]
+async fn test_orientation_correction_ignores_out_of_range_pages() {
+    let upright = text_only_parser(vec![])
+        .parse("../../integration_tests_data/sample.pdf")
+        .await
+        .unwrap();
+    let corrected = text_only_parser(vec![correction(7, 180), correction(1, 0)])
+        .parse("../../integration_tests_data/sample.pdf")
+        .await
+        .unwrap();
+    assert_eq!(corrected.pages[0].text, upright.pages[0].text);
+}
+
+#[tokio::test]
+async fn test_orientation_correction_rejects_non_cardinal_angle() {
+    let result = text_only_parser(vec![correction(1, 45)])
+        .parse("../../integration_tests_data/sample.pdf")
+        .await;
+    match result {
+        Err(liteparse::LiteParseError::Config(message)) => {
+            assert!(message.contains("45"), "{message}")
+        }
+        Err(other) => panic!("expected a config error, got {other}"),
+        Ok(_) => panic!("45° is not a valid correction and must be rejected"),
+    }
+}

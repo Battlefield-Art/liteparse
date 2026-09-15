@@ -313,6 +313,25 @@ impl LiteParse {
             .map_err(|e| format!("invalid --target-pages: {}", e).into())
     }
 
+    /// Open `input` and apply the configured per-page orientation
+    /// corrections. `/Rotate` rewrites live in the open document only, so
+    /// every code path that reopens the input (extraction, OCR rounds, the
+    /// pristine form-render copy, batch sessions) must open through here to
+    /// see the same page geometry.
+    fn open_document<'lib>(
+        &self,
+        lib: &'lib Library,
+        input: &PdfInput,
+        password: Option<&str>,
+    ) -> Result<pdfium::Document<'lib>, LiteParseError> {
+        let document = extract::load_document_from_input(lib, input, password)?;
+        extract::apply_page_orientation_corrections(
+            &document,
+            &self.config.page_orientation_corrections,
+        )?;
+        Ok(document)
+    }
+
     fn validate_output_config(&self) -> Result<(), LiteParseError> {
         if self.config.image_output_dir.is_some() && !self.config.effective_extract_images() {
             return Err(LiteParseError::Config(
@@ -361,7 +380,7 @@ impl LiteParse {
 
         let (pages, mut page_complexities) = {
             let lib = Library::init();
-            let document = extract::load_document_from_input(&lib, &validated_input, password)?;
+            let document = self.open_document(&lib, &validated_input, password)?;
 
             // Complexity deliberately runs against the flattened document: once
             // widget text lives in the content stream it is genuinely within
@@ -604,7 +623,7 @@ impl LiteParse {
             let document_input = repaired_input.as_ref().unwrap_or(validated_input);
             #[cfg(target_arch = "wasm32")]
             let document_input = validated_input;
-            let document = extract::load_document_from_input(&lib, document_input, password)?;
+            let document = self.open_document(&lib, document_input, password)?;
             let total_pages = document.page_count().max(0) as u32;
             let form_type = self
                 .config
@@ -695,7 +714,7 @@ impl LiteParse {
                 && self.config.extract_screenshots
                 && self.config.render_form_fields;
             let pristine_document = needs_pristine_document
-                .then(|| extract::load_document_from_input(&lib, document_input, password))
+                .then(|| self.open_document(&lib, document_input, password))
                 .transpose()?;
             let analysis_document = pristine_document.as_ref().unwrap_or(&document);
             let t_extract = web_time::Instant::now();
@@ -796,7 +815,7 @@ impl LiteParse {
             while round_start < pages.len() {
                 let (rendered, next_start) = {
                     let lib = Library::init();
-                    let document = extract::load_document_from_input(&lib, ocr_input, password)?;
+                    let document = self.open_document(&lib, ocr_input, password)?;
                     ocr_merge::render_pages_for_ocr(
                         &document,
                         &pages,
@@ -1110,6 +1129,7 @@ impl LiteParse {
             self.config.password.as_deref(),
             self.config.detect_screenshot_rects,
             self.config.render_form_fields,
+            &self.config.page_orientation_corrections,
         )?;
 
         Ok(rendered

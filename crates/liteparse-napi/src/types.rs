@@ -2,7 +2,9 @@ use std::collections::HashMap;
 
 use napi_derive::napi;
 
-use liteparse::config::{CropBox, ImageMode, LiteParseConfig, OutputFormat};
+use liteparse::config::{
+    CropBox, ImageMode, LiteParseConfig, OutputFormat, PageOrientationCorrection,
+};
 use liteparse::layout::{LayoutBlock, LayoutCell};
 use liteparse::parser::ParseResult;
 use liteparse::types::{
@@ -113,12 +115,28 @@ pub struct JsLiteParseConfig {
     /// Drop diagonal text (rotation >2° off the nearest right angle). Default
     /// false. Use to exclude rotated watermarks/stamps from the output.
     pub skip_diagonal_text: Option<bool>,
+    /// Per-page orientation corrections from an upstream orientation
+    /// classifier. Each entry names a 1-based page and the clockwise angle
+    /// (0/90/180/270) by which its content appears rotated; LiteParse
+    /// counter-rotates that page before extraction so text, reading order,
+    /// page size and OCR rasters come out upright. Applied on top of the PDF's
+    /// own /Rotate. Unlisted or out-of-range pages are left unchanged.
+    pub page_orientation_corrections: Option<Vec<JsPageOrientationCorrection>>,
     /// Compute per-page complexity signals during parse and attach them to each
     /// page as `ParsedPage.complexity` (the same signals `isComplex` returns).
     /// Default false; enabling it runs an extra vector-text detection pass.
     pub include_complexity: Option<bool>,
     /// Expose page-scoped vector path extraction. Default false.
     pub extract_vector_graphics: Option<bool>,
+}
+
+/// One page's orientation correction: `page` is 1-based, `angle` is the
+/// clockwise degrees (0/90/180/270) the content appears rotated.
+#[napi(object)]
+#[derive(Clone)]
+pub struct JsPageOrientationCorrection {
+    pub page: u32,
+    pub angle: u32,
 }
 
 /// A page sub-region as the fraction cropped from each side (top-left origin,
@@ -253,6 +271,15 @@ impl JsLiteParseConfig {
         if let Some(v) = self.skip_diagonal_text {
             cfg.skip_diagonal_text = v;
         }
+        if let Some(v) = self.page_orientation_corrections {
+            cfg.page_orientation_corrections = v
+                .into_iter()
+                .map(|c| PageOrientationCorrection {
+                    page: c.page,
+                    angle: u16::try_from(c.angle).unwrap_or(u16::MAX),
+                })
+                .collect();
+        }
         if let Some(v) = self.include_complexity {
             cfg.include_complexity = v;
         }
@@ -321,6 +348,15 @@ impl JsLiteParseConfig {
                 left: c.left as f64,
             }),
             skip_diagonal_text: Some(cfg.skip_diagonal_text),
+            page_orientation_corrections: Some(
+                cfg.page_orientation_corrections
+                    .iter()
+                    .map(|c| JsPageOrientationCorrection {
+                        page: c.page,
+                        angle: u32::from(c.angle),
+                    })
+                    .collect(),
+            ),
             include_complexity: Some(cfg.include_complexity),
             extract_vector_graphics: Some(cfg.extract_vector_graphics),
         }
