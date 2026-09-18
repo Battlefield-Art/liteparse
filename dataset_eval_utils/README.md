@@ -83,19 +83,6 @@ Options:
 
 Reports per-document latency plus TOTAL / AVG-per-doc / MS-per-page rows.
 
-#### Parity with the published speed benchmarks
-
-The providers are configured to match the run recorded in `../SPEED_BENCHMARKS.md`:
-OCR is off in every parser that has it, and each tool keeps its own layout engine
-(notably pymupdf4llm keeps the PyMuPDF layout model it enables by default). On a
-shared sample the two harnesses agree on total time to within ~10% — inside normal
-run-to-run variance — and produce byte-identical text for every parser except
-`pypdf`, which differs only by one newline per page boundary.
-
-`opendataloader` needs **Java 11+**; the provider locates one via `JAVA_HOME` or the
-usual install paths and raises a clear error if only Java 8 is present (its jar
-otherwise fails on every document with `UnsupportedClassVersionError`).
-
 ## Parser Providers
 
 | Provider | Library | Notes |
