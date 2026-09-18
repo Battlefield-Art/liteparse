@@ -69,14 +69,32 @@ Outputs:
 Measures parse latency and memory usage across providers.
 
 ```bash
-lp-benchmark document.pdf --providers pymupdf liteparse --runs 20
+lp-benchmark ./documents --providers pymupdf liteparse --warmup-runs 0
 ```
+
+Takes a **directory** of PDFs (searched recursively), not a single file.
 
 Options:
 - `--providers` — Providers to benchmark (default: all local providers)
-- `--runs` — Number of benchmark runs per provider (default: 10)
-- `--warmup` — Number of warmup runs (default: 1)
+- `--warmup-runs` — Full passes over the corpus before timing starts (default: 5).
+  Each warmup run parses **every** document, so on a large corpus this dominates
+  wall time; use `0` for a quick measurement.
 - `--output` — Path to save JSON results
+
+Reports per-document latency plus TOTAL / AVG-per-doc / MS-per-page rows.
+
+#### Parity with the published speed benchmarks
+
+The providers are configured to match the run recorded in `../SPEED_BENCHMARKS.md`:
+OCR is off in every parser that has it, and each tool keeps its own layout engine
+(notably pymupdf4llm keeps the PyMuPDF layout model it enables by default). On a
+shared sample the two harnesses agree on total time to within ~10% — inside normal
+run-to-run variance — and produce byte-identical text for every parser except
+`pypdf`, which differs only by one newline per page boundary.
+
+`opendataloader` needs **Java 11+**; the provider locates one via `JAVA_HOME` or the
+usual install paths and raises a clear error if only Java 8 is present (its jar
+otherwise fails on every document with `UnsupportedClassVersionError`).
 
 ## Parser Providers
 
